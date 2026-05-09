@@ -1,7 +1,7 @@
 """
 抖音视频数据可视化看板（GitHub Raw 版）
 数据源：GitHub 仓库中的 Excel 文件（通过 Raw URL 实时读取）
-运行命令：streamlit run 本文件.py
+运行命令：streamlit run douyin_dashboard.py
 """
 
 import streamlit as st
@@ -23,51 +23,56 @@ st.set_page_config(
 )
 
 # ======================== 数据源配置 ========================
-# ⚠️ 请替换为你的 GitHub Raw URL（获取方式：仓库中点击文件 → Raw 按钮 → 复制地址栏链接）
+# ⚠️ 请替换为你的 GitHub Raw URL
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/抖音视频数据汇总.xlsx"
 
 # ======================== 数据加载与清洗 ========================
 @st.cache_data(ttl=3600, show_spinner="正在从 GitHub 加载数据...")
 def load_data_from_github(url):
-    """从 GitHub Raw URL 加载 Excel，返回原始 DataFrame（中文列名）"""
+    """从 GitHub Raw URL 加载 Excel，返回原始 DataFrame"""
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # 检查请求是否成功
-        # 将二进制内容转为 DataFrame
-        df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
-        return df
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+
+        # 检查返回的内容是否是 Excel 文件（前两个字节是 PK）
+        content = response.content
+        if len(content) < 4:
+            st.error("❌ 文件内容为空")
+            return pd.DataFrame()
+
+        # 尝试读取 Excel
+        try:
+            df = pd.read_excel(BytesIO(content), engine='openpyxl')
+            return df
+        except Exception as e:
+            # 如果不是 Excel，可能是 HTML 错误页面，打印前200字符帮助调试
+            preview = content[:200].decode('utf-8', errors='ignore')
+            st.error(f"❌ 读取 Excel 失败: {e}")
+            st.text(f"返回内容预览:\n{preview}")
+            return pd.DataFrame()
+
     except requests.exceptions.RequestException as e:
-        st.error(f"❌ 网络请求失败: {e}\n请检查 Raw URL 是否正确，或网络是否可达。")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"❌ 读取 Excel 失败: {e}")
+        st.error(f"❌ 网络请求失败: {e}")
         return pd.DataFrame()
 
 def preprocess_for_analysis(df):
-    """
-    为分析功能预处理数据：
-    - 转换数值列
-    - 转换日期列
-    - 保留原始中文列名，仅新增派生列（如 'publish_date' 为日期类型）
-    """
+    """预处理数据：转换数值列和日期列"""
     if df.empty:
         return df
     df_work = df.copy()
 
-    # 数值列转换
     num_cols_cn = ['点赞数', '评论数', '分享数', '收藏数', '粉丝数', '获赞总数']
     for col in num_cols_cn:
         if col in df_work.columns:
             df_work[col] = pd.to_numeric(df_work[col], errors='coerce')
 
-    # 日期列转换
     if '创建时间' in df_work.columns:
         df_work['publish_date'] = pd.to_datetime(df_work['创建时间'], errors='coerce')
 
     return df_work
 
 def get_author_aggregation(df):
-    """基于筛选后的df，返回作者维度的聚合数据"""
+    """作者维度聚合"""
     if df.empty or '作者昵称' not in df.columns:
         return pd.DataFrame()
     agg_dict = {'视频ID': 'count'}
@@ -87,7 +92,6 @@ def get_author_aggregation(df):
         author_stats.rename(columns={'收藏数': '总收藏数'}, inplace=True)
     if '粉丝数' in df.columns:
         fans = df.groupby('作者昵称')['粉丝数'].max().reset_index()
-        fans.rename(columns={'粉丝数': '粉丝数'}, inplace=True)
         author_stats = author_stats.merge(fans, on='作者昵称', how='left')
     else:
         author_stats['粉丝数'] = None
@@ -98,21 +102,18 @@ def main():
     st.title("🎵 抖音视频数据可视化看板")
     st.markdown(f"**数据源**：GitHub 仓库（实时同步）")
 
-    # 加载原始数据（从 GitHub Raw URL）
     raw_df = load_data_from_github(GITHUB_RAW_URL)
     if raw_df.empty:
         st.stop()
 
-    # 预处理分析用数据
     df_ana = preprocess_for_analysis(raw_df)
 
-    # ========== 侧边栏全局筛选 ==========
+    # 侧边栏筛选
     st.sidebar.header("🔍 全局数据筛选")
     st.sidebar.markdown(f"**原始视频数**: {len(df_ana)}")
 
     filter_mask = pd.Series([True] * len(df_ana))
 
-    # 日期范围筛选
     if 'publish_date' in df_ana.columns:
         valid_dates = df_ana['publish_date'].dropna()
         if not valid_dates.empty:
@@ -130,9 +131,7 @@ def main():
                 start_date, end_date = date_range
             mask = (df_ana['publish_date'].dt.date >= start_date) & (df_ana['publish_date'].dt.date <= end_date)
             filter_mask &= mask
-            st.sidebar.info(f"筛选后视频数: {filter_mask.sum()}")
 
-    # 数值指标滑块筛选
     for col_cn in ['点赞数', '评论数', '分享数', '收藏数']:
         if col_cn in df_ana.columns and not df_ana[col_cn].isna().all():
             min_val = float(df_ana[col_cn].min())
@@ -142,11 +141,10 @@ def main():
                 mask = (df_ana[col_cn] >= selected[0]) & (df_ana[col_cn] <= selected[1])
                 filter_mask &= mask
 
-    # 应用筛选
     df_filtered = df_ana[filter_mask].copy()
     raw_filtered = raw_df.loc[filter_mask] if filter_mask.dtype == bool else raw_df.iloc[filter_mask]
 
-    # ========== 作者双榜 ==========
+    # 作者双榜
     st.subheader("👥 作者维度综合排行榜")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
@@ -169,53 +167,34 @@ def main():
     else:
         st.info("未找到作者昵称列，无法进行作者排行榜分析。")
 
-    # ==================== 单日发布监控（含未发布筛选） ====================
+    # 单日发布监控
     st.subheader("🔍 单日发布监控（支持筛选未发布作者）")
-    st.markdown("选择日期，查看每位作者当天的视频发布数量，并可筛选显示未发布/已发布作者。")
-
-    # 基于原始数据（不受全局筛选影响）以便查看所有作者的发布状态
     if '创建时间' in raw_df.columns and '作者昵称' in raw_df.columns:
         raw_df_date = raw_df.copy()
         raw_df_date['publish_date'] = pd.to_datetime(raw_df_date['创建时间'], errors='coerce')
         valid_pub = raw_df_date['publish_date'].dropna()
-
         if not valid_pub.empty:
             min_date_all = valid_pub.min().date()
             max_date_all = valid_pub.max().date()
             default_date = max_date_all
-            selected_date = st.date_input(
-                "📅 选择检查日期",
-                value=default_date,
-                min_value=min_date_all,
-                max_value=None
-            )
-
-            # 统计当天各作者发布数量
+            selected_date = st.date_input("📅 选择检查日期", value=default_date,
+                                          min_value=min_date_all, max_value=None)
             mask_today = (raw_df_date['publish_date'].dt.date == selected_date)
             daily_stats = raw_df_date[mask_today].groupby('作者昵称').size().reset_index(name='当天发布数')
-
-            # 获取所有作者（去重）
-            all_authors = raw_df_date['作者昵称'].dropna().unique()
-            all_authors = sorted(all_authors)
+            all_authors = sorted(raw_df_date['作者昵称'].dropna().unique())
             author_status = pd.DataFrame({'作者昵称': all_authors})
             author_status = author_status.merge(daily_stats, on='作者昵称', how='left')
             author_status['当天发布数'] = author_status['当天发布数'].fillna(0).astype(int)
             author_status['发布状态'] = author_status['当天发布数'].apply(lambda x: '✅ 已发布' if x > 0 else '❌ 未发布')
-
-            # 筛选选项
-            filter_option = st.radio(
-                "筛选作者：",
+            filter_option = st.radio("筛选作者：",
                 ["全部作者", "仅未发布作者 (当天发布数为0)", "仅已发布作者 (当天发布数>0)"],
-                horizontal=True
-            )
+                horizontal=True)
             if filter_option == "仅未发布作者 (当天发布数为0)":
                 author_status = author_status[author_status['当天发布数'] == 0]
             elif filter_option == "仅已发布作者 (当天发布数>0)":
                 author_status = author_status[author_status['当天发布数'] > 0]
-
             st.write(f"### {selected_date} 作者发布情况 (共 {len(author_status)} 位)")
             st.dataframe(author_status, use_container_width=True)
-
             total_authors = len(all_authors)
             published_authors = len(daily_stats)
             total_videos_today = daily_stats['当天发布数'].sum()
@@ -225,14 +204,11 @@ def main():
     else:
         st.info("原始数据缺少'创建时间'或'作者昵称'列，无法进行单日监控。")
 
-    # ========== 原始数据预览 ==========
+    # 原始数据预览
     st.subheader("📄 原始数据预览（筛选后）")
     display_cols_cn = ['作者昵称', '视频描述', '点赞数', '评论数', '分享数', '收藏数', '粉丝数', '创建时间']
     existing_cn = [c for c in display_cols_cn if c in raw_filtered.columns]
-    if existing_cn:
-        preview_df = raw_filtered[existing_cn]
-    else:
-        preview_df = raw_filtered
+    preview_df = raw_filtered[existing_cn] if existing_cn else raw_filtered
     show_all = st.checkbox("显示全部数据（默认仅显示前100行）")
     if show_all:
         st.dataframe(preview_df, use_container_width=True)
@@ -241,7 +217,7 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("📌 说明")
-    st.sidebar.info("看板支持单日发布监控（可筛选未发布作者）、作者双排行榜，日期选择无上限。\n\n数据源：GitHub Raw URL，每天自动同步。")
+    st.sidebar.info("看板支持单日发布监控、作者双排行榜。数据源为 GitHub Raw URL，每次刷新页面最多延迟 1 小时缓存。")
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,5 @@
 streamlit
 pandas
 plotly
-sqlalchemy
-pymysql
 requests
+openpyxl
