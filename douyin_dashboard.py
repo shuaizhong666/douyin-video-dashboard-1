@@ -1,6 +1,6 @@
 """
-抖音视频数据可视化看板（数据库直连版）
-数据来源：阿里云 RDS MySQL（表：douyin_bu_live_talent_video_data，字段均为中文）
+抖音视频数据可视化看板（飞书多维表版）
+数据来源：飞书多维表（全自动实时读取）
 运行命令：streamlit run 本文件.py
 """
 
@@ -8,10 +8,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import warnings
+import requests
 from datetime import date
-from sqlalchemy import create_engine
 
 warnings.filterwarnings('ignore')
+
+# ======================== 飞书多维表配置（已填好你的信息） ========================
+APP_ID = "cli_a9a7fc6f2e38dcc2"
+APP_SECRET = "igxbbNUPGJMDdD6sV8lpWhZQ7m133xpO"
+# 你的飞书多维表信息
+APP_TOKEN = "NW2bbjZ7PabrIQsab1mc3i0Mnxd"
+TABLE_ID = "tblxKCETQFNVZRiQ"
 
 # ======================== 页面配置 ========================
 st.set_page_config(
@@ -21,38 +28,57 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ======================== 数据库配置 ========================
-DB_HOST = "rm-uf6phn36978u55695.mysql.rds.aliyuncs.com"
-DB_PORT = 3306
-DB_USER = "rpa_cn"
-DB_PASSWORD = "RPA@Dreame@2021"
-DB_NAME = "rpa"
-TABLE_NAME = "douyin_bu_live_talent_video_data"
+# ======================== 飞书多维表数据读取 ========================
+def get_tenant_access_token():
+    """获取飞书接口凭证"""
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    res = requests.post(url, json={
+        "app_id": APP_ID,
+        "app_secret": APP_SECRET
+    })
+    return res.json()["tenant_access_token"]
 
-# 注意：密码中的 @ 需要转义为 %40，否则 URL 解析会失败
-DB_URL = f"mysql+pymysql://{DB_USER}:RPA%40Dreame%402021@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-
-# ======================== 数据加载与清洗 ========================
-@st.cache_resource
-def init_db_engine():
-    """创建数据库引擎（单例）"""
-    return create_engine(DB_URL)
-
-@st.cache_data(ttl=3600, show_spinner="正在从数据库加载数据...")
-def load_data_from_db():
-    """从 MySQL 表读取数据，返回原始 DataFrame（中文列名）"""
+@st.cache_data(ttl=3600, show_spinner="正在从飞书多维表加载数据...")
+def load_data_from_feishu():
+    """从飞书多维表读取所有数据，返回DataFrame"""
     try:
-        engine = init_db_engine()
-        query = f"SELECT * FROM {TABLE_NAME}"
-        df = pd.read_sql(query, con=engine)
+        token = get_tenant_access_token()
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        all_records = []
+        page_token = None
+
+        # 分页读取所有数据
+        while True:
+            params = {"page_token": page_token} if page_token else {}
+            response = requests.get(url, headers=headers, params=params).json()
+
+            if response.get("code") != 0:
+                st.error(f"飞书API错误：{response}")
+                return pd.DataFrame()
+
+            # 提取数据
+            items = response["data"]["items"]
+            for item in items:
+                all_records.append(item["fields"])
+
+            # 判断是否还有下一页
+            has_more = response["data"].get("has_more", False)
+            if not has_more:
+                break
+            page_token = response["data"].get("page_token")
+
+        df = pd.DataFrame(all_records)
         if df.empty:
-            st.warning("数据库表中暂无数据。")
+            st.warning("多维表中暂无数据。")
         return df
+
     except Exception as e:
-        st.error(f"❌ 数据库连接或查询失败: {e}")
-        st.error("请检查网络、账号权限及表名是否正确。")
+        st.error(f"❌ 飞书多维表连接失败: {e}")
         return pd.DataFrame()
 
+# ======================== 数据加载与清洗（原逻辑完全保留） ========================
 def preprocess_for_analysis(df):
     """
     为分析功能预处理数据：
@@ -70,11 +96,10 @@ def preprocess_for_analysis(df):
         if col in df_work.columns:
             df_work[col] = pd.to_numeric(df_work[col], errors='coerce')
 
-    # 日期列转换（假设字段名为“创建时间”）
+    # 日期列转换（匹配飞书多维表字段）
     if '创建时间' in df_work.columns:
         df_work['publish_date'] = pd.to_datetime(df_work['创建时间'], errors='coerce')
     else:
-        # 如果没有“创建时间”列，尝试其他可能的日期列名
         possible_date_cols = ['发布时间', 'publish_time', 'create_time']
         for col in possible_date_cols:
             if col in df_work.columns:
@@ -90,13 +115,10 @@ def get_author_aggregation(df):
     if df.empty or '作者昵称' not in df.columns:
         return pd.DataFrame()
 
-    # 发布数量：优先使用“视频ID”计数，若不存在则使用行数
     if '视频ID' in df.columns:
         agg_dict = {'视频ID': 'count'}
     else:
-        # 没有视频ID列时，直接计数行数
         author_stats = df.groupby('作者昵称').size().reset_index(name='发布数量')
-        # 后续合并其他指标
         agg_dict = None
 
     if agg_dict:
@@ -115,7 +137,6 @@ def get_author_aggregation(df):
         if '收藏数' in df.columns:
             author_stats.rename(columns={'收藏数': '总收藏数'}, inplace=True)
     else:
-        # 已经计算了发布数量，但还需要添加点赞、评论、收藏的汇总
         if '点赞数' in df.columns:
             likes_sum = df.groupby('作者昵称')['点赞数'].sum().reset_index().rename(columns={'点赞数': '总点赞数'})
             author_stats = author_stats.merge(likes_sum, on='作者昵称', how='left')
@@ -126,22 +147,21 @@ def get_author_aggregation(df):
             collects_sum = df.groupby('作者昵称')['收藏数'].sum().reset_index().rename(columns={'收藏数': '总收藏数'})
             author_stats = author_stats.merge(collects_sum, on='作者昵称', how='left')
 
-    # 粉丝数：取每个作者的最大值（假设不变）
     if '粉丝数' in df.columns:
-        fans = df.groupby('作者昵称')['粉丝数'].max().reset_index().rename(columns={'粉丝数': '粉丝数'})
+        fans = df.groupby('作者昵称')['粉丝数'].max().reset_index()
         author_stats = author_stats.merge(fans, on='作者昵称', how='left')
     else:
         author_stats['粉丝数'] = None
 
     return author_stats
 
-# ======================== 主界面 ========================
+# ======================== 主界面（原逻辑100%保留） ========================
 def main():
     st.title("🎵 抖音视频数据可视化看板")
-    st.markdown("**数据来源**：阿里云 RDS MySQL（每日自动更新）")
+    st.markdown("**数据来源**：飞书多维表（实时自动更新）")
 
-    # 加载原始数据
-    raw_df = load_data_from_db()
+    # 加载飞书多维表数据
+    raw_df = load_data_from_feishu()
     if raw_df.empty:
         st.stop()
 
@@ -215,7 +235,6 @@ def main():
     st.subheader("🔍 单日发布监控（支持筛选未发布作者）")
     st.markdown("选择日期，查看每位作者当天的视频发布数量，并可筛选显示未发布/已发布作者。")
 
-    # 基于原始数据（不受全局筛选影响）以便查看所有作者的发布状态
     if '创建时间' in raw_df.columns and '作者昵称' in raw_df.columns:
         raw_df_date = raw_df.copy()
         raw_df_date['publish_date'] = pd.to_datetime(raw_df_date['创建时间'], errors='coerce')
@@ -232,11 +251,9 @@ def main():
                 max_value=None
             )
 
-            # 统计当天各作者发布数量
             mask_today = (raw_df_date['publish_date'].dt.date == selected_date)
             daily_stats = raw_df_date[mask_today].groupby('作者昵称').size().reset_index(name='当天发布数')
 
-            # 获取所有作者（去重）
             all_authors = raw_df_date['作者昵称'].dropna().unique()
             all_authors = sorted(all_authors)
             author_status = pd.DataFrame({'作者昵称': all_authors})
@@ -244,7 +261,6 @@ def main():
             author_status['当天发布数'] = author_status['当天发布数'].fillna(0).astype(int)
             author_status['发布状态'] = author_status['当天发布数'].apply(lambda x: '✅ 已发布' if x > 0 else '❌ 未发布')
 
-            # 筛选选项
             filter_option = st.radio(
                 "筛选作者：",
                 ["全部作者", "仅未发布作者 (当天发布数为0)", "仅已发布作者 (当天发布数>0)"],
