@@ -10,7 +10,9 @@ import plotly.express as px
 import requests
 from io import BytesIO
 import warnings
-from datetime import date
+from datetime import date, datetime  # ✅ 修复 datetime 未定义
+import tempfile
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -23,37 +25,77 @@ st.set_page_config(
 )
 
 # ======================== 数据源配置 ========================
-# ⚠️ 请替换为你的 GitHub Raw URL
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/抖音视频数据汇总.xlsx"
 
-# ======================== 数据加载与清洗 ========================
+# ======================== 增强的加载函数 ========================
 @st.cache_data(ttl=3600, show_spinner="正在从 GitHub 加载数据...")
-def load_data_from_github(url):
-    """从 GitHub Raw URL 加载 Excel，返回原始 DataFrame"""
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-
-        # 检查返回的内容是否是 Excel 文件（前两个字节是 PK）
-        content = response.content
-        if len(content) < 4:
-            st.error("❌ 文件内容为空")
-            return pd.DataFrame()
-
-        # 尝试读取 Excel
+def load_data_from_github(url, max_retries=3):
+    """
+    从 GitHub Raw URL 加载 Excel，带重试、诊断和备用读取方案。
+    """
+    for attempt in range(max_retries):
         try:
-            df = pd.read_excel(BytesIO(content), engine='openpyxl')
-            return df
-        except Exception as e:
-            # 如果不是 Excel，可能是 HTML 错误页面，打印前200字符帮助调试
-            preview = content[:200].decode('utf-8', errors='ignore')
-            st.error(f"❌ 读取 Excel 失败: {e}")
-            st.text(f"返回内容预览:\n{preview}")
-            return pd.DataFrame()
+            # 添加随机参数避免 CDN 缓存
+            random_param = f"?_={int(datetime.now().timestamp())}" if attempt > 0 else ""
+            final_url = url + random_param
+            response = requests.get(final_url, timeout=30)
+            response.raise_for_status()
 
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ 网络请求失败: {e}")
-        return pd.DataFrame()
+            # 检查 Content-Length（如果有）
+            content_length = response.headers.get('Content-Length')
+            if content_length and int(content_length) < 1000:
+                st.warning(f"⚠️ 文件很小（{content_length} 字节），可能不是完整的 Excel 文件。")
+
+            content = response.content
+
+            # 方法1：直接使用 pandas + openpyxl
+            try:
+                df = pd.read_excel(BytesIO(content), engine='openpyxl')
+                if df.empty:
+                    st.warning("Excel 文件读取成功，但数据为空。")
+                else:
+                    st.success(f"✅ 数据加载成功，共 {len(df)} 行记录")
+                return df
+            except Exception as e1:
+                st.warning(f"pandas 直接读取失败: {e1}")
+
+                # 方法2：写入临时文件，用 openpyxl 直接加载
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                        tmp.write(content)
+                        tmp_path = tmp.name
+                    from openpyxl import load_workbook
+                    wb = load_workbook(tmp_path, read_only=True)
+                    sheet = wb.active
+                    # 将数据转为 DataFrame
+                    data = sheet.values
+                    cols = next(data)
+                    df = pd.DataFrame(data, columns=cols)
+                    wb.close()
+                    os.unlink(tmp_path)
+                    st.success("✅ 通过 openpyxl 直接加载成功")
+                    return df
+                except Exception as e2:
+                    st.error(f"临时文件读取也失败: {e2}")
+                    # 诊断：检查文件头部是否为 PK 且是有效 zip
+                    if content[:4] == b'PK\x03\x04':
+                        st.error("文件头正确（PK），但 openpyxl 无法解析。可能是文件损坏，请确认本地 Excel 能否正常打开。")
+                        # 显示前 200 字节的十六进制
+                        hex_preview = ' '.join(f'{b:02x}' for b in content[:32])
+                        st.text(f"文件头 hex: {hex_preview}")
+                    else:
+                        st.error(f"文件头不是 zip 文件。前20字节: {content[:20]}")
+                    raise e2
+
+        except requests.exceptions.RequestException as e:
+            st.error(f"网络请求失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                return pd.DataFrame()
+        except Exception as e:
+            st.error(f"读取 Excel 失败: {e}")
+            if attempt == max_retries - 1:
+                return pd.DataFrame()
+    return pd.DataFrame()
 
 def preprocess_for_analysis(df):
     """预处理数据：转换数值列和日期列"""
@@ -111,7 +153,6 @@ def main():
     # 侧边栏筛选
     st.sidebar.header("🔍 全局数据筛选")
     st.sidebar.markdown(f"**原始视频数**: {len(df_ana)}")
-
     filter_mask = pd.Series([True] * len(df_ana))
 
     if 'publish_date' in df_ana.columns:
@@ -131,6 +172,7 @@ def main():
                 start_date, end_date = date_range
             mask = (df_ana['publish_date'].dt.date >= start_date) & (df_ana['publish_date'].dt.date <= end_date)
             filter_mask &= mask
+            st.sidebar.info(f"筛选后视频数: {filter_mask.sum()}")
 
     for col_cn in ['点赞数', '评论数', '分享数', '收藏数']:
         if col_cn in df_ana.columns and not df_ana[col_cn].isna().all():
