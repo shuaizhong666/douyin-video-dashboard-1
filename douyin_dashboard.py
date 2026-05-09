@@ -1,14 +1,15 @@
 """
-抖音视频数据可视化看板（本地路径版）
-数据文件：C:\RPAWorkspace\抖音视频数据汇总.xlsx
+抖音视频数据可视化看板（GitHub Raw 版）
+数据源：GitHub 仓库中的 Excel 文件（通过 Raw URL 实时读取）
 运行命令：streamlit run 本文件.py
 """
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import requests
+from io import BytesIO
 import warnings
-from pathlib import Path
 from datetime import date
 
 warnings.filterwarnings('ignore')
@@ -21,21 +22,25 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ======================== 数据文件路径 ========================
-DATA_FILE = Path(r"C:\RPAWorkspace\抖音视频数据汇总.xlsx")
+# ======================== 数据源配置 ========================
+# ⚠️ 请替换为你的 GitHub Raw URL（获取方式：仓库中点击文件 → Raw 按钮 → 复制地址栏链接）
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/抖音视频数据汇总.xlsx"
 
 # ======================== 数据加载与清洗 ========================
-@st.cache_data
-def load_data(file_path):
-    """加载Excel，返回原始DataFrame（中文列名）"""
-    if not file_path.exists():
-        st.error(f"❌ 文件不存在: {file_path}\n请确保文件已放置在指定目录。")
-        return pd.DataFrame()
+@st.cache_data(ttl=3600, show_spinner="正在从 GitHub 加载数据...")
+def load_data_from_github(url):
+    """从 GitHub Raw URL 加载 Excel，返回原始 DataFrame（中文列名）"""
     try:
-        df = pd.read_excel(file_path, engine='openpyxl')
+        response = requests.get(url)
+        response.raise_for_status()  # 检查请求是否成功
+        # 将二进制内容转为 DataFrame
+        df = pd.read_excel(BytesIO(response.content), engine='openpyxl')
         return df
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ 网络请求失败: {e}\n请检查 Raw URL 是否正确，或网络是否可达。")
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"读取Excel失败: {e}")
+        st.error(f"❌ 读取 Excel 失败: {e}")
         return pd.DataFrame()
 
 def preprocess_for_analysis(df):
@@ -91,10 +96,10 @@ def get_author_aggregation(df):
 # ======================== 主界面 ========================
 def main():
     st.title("🎵 抖音视频数据可视化看板")
-    st.markdown(f"**数据文件**：`{DATA_FILE}`")
+    st.markdown(f"**数据源**：GitHub 仓库（实时同步）")
 
-    # 加载原始数据
-    raw_df = load_data(DATA_FILE)
+    # 加载原始数据（从 GitHub Raw URL）
+    raw_df = load_data_from_github(GITHUB_RAW_URL)
     if raw_df.empty:
         st.stop()
 
@@ -236,7 +241,7 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("📌 说明")
-    st.sidebar.info("看板支持单日发布监控（可筛选未发布作者）、作者双排行榜，日期选择无上限。")
+    st.sidebar.info("看板支持单日发布监控（可筛选未发布作者）、作者双排行榜，日期选择无上限。\n\n数据源：GitHub Raw URL，每天自动同步。")
 
 if __name__ == "__main__":
     main()
