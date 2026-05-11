@@ -74,6 +74,7 @@ def load_data_from_github(url, max_retries=3):
 def preprocess_for_analysis(df):
     """
     预处理：转换数值类型、解析日期、处理昵称空值、添加姓名/工号兜底、创建分组键
+    对于无效昵称（为空或纯空白），强制所有指标为0，视频ID置NaN，不计入发布数量。
     """
     if df.empty:
         return df
@@ -87,7 +88,7 @@ def preprocess_for_analysis(df):
         df_work['工号'] = ''
         st.info("⚠️ 原始数据中缺少「工号」列，已在看板中补空白，请后续补充映射关系。")
 
-    # 2. 数值列转换
+    # 2. 数值列转换，缺失填充0
     num_cols_cn = ['点赞数', '评论数', '分享数', '收藏数', '粉丝数', '获赞总数']
     for col in num_cols_cn:
         if col in df_work.columns:
@@ -102,27 +103,27 @@ def preprocess_for_analysis(df):
         df_work['has_valid_nickname'] = False
         st.warning("原始数据中缺少「作者昵称」列，将无法正确识别抖音账号。")
 
-    # 4. 对于无有效昵称的行，强制所有指标为0，并且不计入发布数量
+    # 4. 对于无有效昵称的行，强制所有指标为0，并且不计入发布数量（视频ID置为NaN）
     invalid_mask = ~df_work['has_valid_nickname']
     if invalid_mask.any():
         for col in num_cols_cn:
             if col in df_work.columns:
                 df_work.loc[invalid_mask, col] = 0
-        # 重要：将视频ID或计数标记置空，后续聚合时会自动忽略（不计数）
         if '视频ID' in df_work.columns:
             df_work.loc[invalid_mask, '视频ID'] = np.nan
-        # 同时将无效昵称的昵称统一改为特殊标记，以便展示
+        # 无效昵称的统一显示为特殊标记，同时创建分组键避免合并
         df_work.loc[invalid_mask, '作者昵称'] = '(无抖音号)'
 
-    # 5. 创建分组键：有有效昵称则用昵称，否则用「姓名+工号」组合（确保每个独立员工单独一行）
+    # 5. 创建分组键：有有效昵称则用昵称，无效昵称则用「姓名+工号」组合（确保每个员工独立）
     df_work['author_group_key'] = df_work['作者昵称']
-    # 对于无抖音号但姓名工号不为空的，用姓名+工号作为分组依据，避免多个员工挤在同一个“无抖音号”组
-    no_nickname_mask = (df_work['作者昵称'] == '(无抖音号)')
-    if no_nickname_mask.any():
-        df_work.loc[no_nickname_mask, 'author_group_key'] = df_work.loc[no_nickname_mask, '姓名'] + '_' + df_work.loc[no_nickname_mask, '工号']
-        # 避免姓名工号都为空时出现重复分组，此时用行索引作为兜底
-        empty_name_id = (df_work['author_group_key'] == '_')
-        df_work.loc[empty_name_id, 'author_group_key'] = df_work.loc[empty_name_id].index.astype(str)
+    if invalid_mask.any():
+        # 安全拼接：将姓名和工号转为字符串，缺失值替换为空字符串
+        name_series = df_work.loc[invalid_mask, '姓名'].astype(str).fillna('')
+        id_series = df_work.loc[invalid_mask, '工号'].astype(str).fillna('')
+        df_work.loc[invalid_mask, 'author_group_key'] = name_series + '_' + id_series
+        # 如果姓名工号都为空，则使用行索引作为唯一标识
+        empty_key_mask = (df_work['author_group_key'] == '_') & invalid_mask
+        df_work.loc[empty_key_mask, 'author_group_key'] = df_work.loc[empty_key_mask].index.astype(str)
 
     # 6. 解析发布日期
     if '创建时间' in df_work.columns:
@@ -141,10 +142,10 @@ def get_author_aggregation(df):
 
     # 定义聚合字典
     agg_dict = {
-        '作者昵称': 'first',           # 取分组内第一个昵称（无抖音号组会显示为'(无抖音号)'）
+        '作者昵称': 'first',
         '姓名': 'first',
         '工号': 'first',
-        '视频ID': 'count',             # 有有效昵称的行视频ID非空，无效昵称的行视频ID为NaN，不会被计数
+        '视频ID': 'count',      # 无效昵称的视频ID为NaN，不会被计数
     }
     if '点赞数' in df.columns:
         agg_dict['点赞数'] = 'sum'
@@ -153,7 +154,7 @@ def get_author_aggregation(df):
     if '收藏数' in df.columns:
         agg_dict['收藏数'] = 'sum'
     if '粉丝数' in df.columns:
-        agg_dict['粉丝数'] = 'max'     # 同一作者的粉丝数通常不变，取最大即可
+        agg_dict['粉丝数'] = 'max'
 
     author_stats = df.groupby('author_group_key').agg(agg_dict).reset_index(drop=True)
 
@@ -170,13 +171,8 @@ def get_author_aggregation(df):
     }
     author_stats.rename(columns=rename_map, inplace=True)
 
-    # 对于无抖音号分组，确保发布数量为0（groupby count 时由于视频ID为NaN，本身就会是0）
-    # 但如果该分组没有任何视频记录（纯占位），则发布数量可能为0，确保显式填充0
-    if '发布数量' in author_stats.columns:
-        author_stats['发布数量'] = author_stats['发布数量'].fillna(0).astype(int)
-
-    # 将缺失的数值列补0
-    for col in ['总点赞数', '总评论数', '总收藏数', '粉丝数']:
+    # 补零
+    for col in ['发布数量', '总点赞数', '总评论数', '总收藏数', '粉丝数']:
         if col in author_stats.columns:
             author_stats[col] = author_stats[col].fillna(0).astype(int)
         else:
@@ -200,7 +196,7 @@ def main():
     if raw_df.empty:
         st.stop()
 
-    # 预处理（已包含姓名/工号、昵称空值处理）
+    # 预处理（已包含姓名/工号、昵称空值处理、分组键等）
     df_ana = preprocess_for_analysis(raw_df)
     link_col = find_video_link_column(raw_df)
 
@@ -245,7 +241,7 @@ def main():
     st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效视频ID计数 | 无抖音号员工自动显示昵称为(无抖音号)且各项指标为0")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
-        # 确保显示顺序：姓名、工号、作者昵称、发布数量、总点赞数...
+        # 确定展示顺序
         display_cols_order = ['姓名', '工号', '作者昵称', '发布数量']
         if '总点赞数' in author_df.columns:
             display_cols_order.append('总点赞数')
@@ -279,30 +275,14 @@ def main():
     else:
         st.info("未找到作者数据，无法进行作者排行榜分析。")
 
-    # ======================== 单日/范围发布监控（含姓名工号） ========================
+    # ======================== 单日/范围发布监控（复用预处理逻辑） ========================
     st.subheader("🔍 发布监控（支持单日或日期范围）")
     st.caption("基于原始全量数据统计，不受左侧筛选影响。无抖音号员工（昵称为空）发布数量恒为0。")
 
-    if '创建时间' in raw_df.columns and '作者昵称' in raw_df.columns:
-        # 对原始数据做同样的预处理（但只取必要列，避免重复计算）
-        raw_date_df = raw_df.copy()
-        raw_date_df['publish_date'] = pd.to_datetime(raw_date_df['创建时间'], errors='coerce')
-        # 添加姓名工号及昵称有效性处理
-        if '姓名' not in raw_date_df.columns:
-            raw_date_df['姓名'] = ''
-        if '工号' not in raw_date_df.columns:
-            raw_date_df['工号'] = ''
-        raw_date_df['作者昵称'] = raw_date_df['作者昵称'].astype(str).str.strip()
-        raw_date_df['has_valid_nickname'] = (raw_date_df['作者昵称'] != '') & (raw_date_df['作者昵称'] != 'nan')
-        # 生成用于分组的分组键（同上）
-        raw_date_df['author_group_key'] = raw_date_df['作者昵称']
-        invalid_mask = ~raw_date_df['has_valid_nickname']
-        raw_date_df.loc[invalid_mask, '作者昵称'] = '(无抖音号)'
-        raw_date_df.loc[invalid_mask, 'author_group_key'] = raw_date_df.loc[invalid_mask, '姓名'] + '_' + raw_date_df.loc[invalid_mask, '工号']
-        empty_comb = (raw_date_df['author_group_key'] == '_')
-        raw_date_df.loc[empty_comb, 'author_group_key'] = raw_date_df.loc[empty_comb].index.astype(str)
-
-        valid_pub = raw_date_df['publish_date'].dropna()
+    # 对原始数据做同样的预处理，得到发布监控专用 DataFrame
+    df_monitor = preprocess_for_analysis(raw_df.copy())
+    if 'publish_date' in df_monitor.columns and 'author_group_key' in df_monitor.columns:
+        valid_pub = df_monitor['publish_date'].dropna()
         if not valid_pub.empty:
             min_date_all = valid_pub.min().date()
             max_date_all = valid_pub.max().date()
@@ -330,7 +310,7 @@ def main():
                     max_value=None,
                     key="single_date"
                 )
-                mask_selected = (raw_date_df['publish_date'].dt.date == selected_date)
+                mask_selected = (df_monitor['publish_date'].dt.date == selected_date)
                 date_desc = selected_date.strftime("%Y-%m-%d")
                 count_label = "当天发布数"
                 title_suffix = f"（{date_desc}）"
@@ -349,25 +329,23 @@ def main():
                 if start_date > end_date:
                     st.error("开始日期不能晚于结束日期")
                     st.stop()
-                mask_selected = (raw_date_df['publish_date'].dt.date >= start_date) & \
-                                (raw_date_df['publish_date'].dt.date <= end_date)
+                mask_selected = (df_monitor['publish_date'].dt.date >= start_date) & \
+                                (df_monitor['publish_date'].dt.date <= end_date)
                 date_desc = f"{start_date} 至 {end_date}"
                 count_label = "范围内发布数"
                 title_suffix = f"（{date_desc}）"
 
-            selected_videos = raw_date_df[mask_selected].copy()
-            # 统计每个分组键的发布数量（注意：如果没有有效昵称，因为视频ID未被清洗，需要确保无效昵称不计入）
-            # 简单处理：统计时只计数 has_valid_nickname 为 True 的行
-            selected_videos['valid_for_count'] = selected_videos['has_valid_nickname']
+            selected_videos = df_monitor[mask_selected].copy()
+            # 统计每个分组键的发布数量（视频ID非空的数量）
             daily_stats = selected_videos.groupby('author_group_key').agg(
-                发布数量=('valid_for_count', 'sum'),
+                发布数量=('视频ID', 'count'),   # count 自动跳过 NaN
                 作者昵称=('作者昵称', 'first'),
                 姓名=('姓名', 'first'),
                 工号=('工号', 'first')
             ).reset_index(drop=True)
 
             # 获取所有作者（所有分组键）
-            all_authors_info = raw_date_df[['author_group_key', '作者昵称', '姓名', '工号']].drop_duplicates('author_group_key')
+            all_authors_info = df_monitor[['author_group_key', '作者昵称', '姓名', '工号']].drop_duplicates('author_group_key')
             author_status = all_authors_info.merge(daily_stats, on='author_group_key', how='left')
             author_status[count_label] = author_status['发布数量'].fillna(0).astype(int)
             author_status.drop(columns=['发布数量'], inplace=True)
@@ -455,7 +433,7 @@ def main():
         "**姓名/工号**：从Excel中读取，若缺失则显示空白。\n\n"
         "**无抖音号员工**：当「作者昵称」为空时，该员工所有指标自动为0，且发布数量不计入任何统计。\n\n"
         "**发布数量定义**：有效抖音号的视频ID计数。\n\n"
-        "**发布监控**：支持单天或日期范围，默认显示昨日数据。\n\n"
+        "**发布监控**：支持单天或范围模式，默认显示昨日数据。\n\n"
         "**视频链接**：若Excel中包含‘视频链接’等列，自动显示可点击链接。"
     )
 
