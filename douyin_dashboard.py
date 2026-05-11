@@ -280,7 +280,7 @@ def main():
             top_publish_display = reorder_columns_with_douyin(top_publish[display_cols_order])
             st.dataframe(top_publish_display, width='stretch')
             fig_pub = px.bar(top_publish, x='作者昵称', y='发布数量',
-                             title="发布数量 Top10 作者（括号内为姓名工号）",
+                             title="发布数量 Top10",
                              text_auto=True, color='发布数量',
                              hover_data=['姓名', '工号'])
             st.plotly_chart(fig_pub, use_container_width=True)
@@ -291,7 +291,7 @@ def main():
                 top_likes_display = reorder_columns_with_douyin(top_likes[display_cols_order])
                 st.dataframe(top_likes_display, width='stretch')
                 fig_likes = px.bar(top_likes, x='作者昵称', y='总点赞数',
-                                   title="总点赞数 Top10 作者（括号内为姓名工号）",
+                                   title="总点赞数 Top10",
                                    text_auto=True, color='总点赞数',
                                    hover_data=['姓名', '工号'])
                 st.plotly_chart(fig_likes, use_container_width=True)
@@ -304,7 +304,7 @@ def main():
                 top_fans_display = reorder_columns_with_douyin(top_fans[display_cols_order])
                 st.dataframe(top_fans_display, width='stretch')
                 fig_fans = px.bar(top_fans, x='作者昵称', y='粉丝数',
-                                  title="粉丝数 Top10 作者（括号内为姓名工号）",
+                                  title="粉丝数 Top10",
                                   text_auto=True, color='粉丝数',
                                   hover_data=['姓名', '工号'])
                 st.plotly_chart(fig_fans, use_container_width=True)
