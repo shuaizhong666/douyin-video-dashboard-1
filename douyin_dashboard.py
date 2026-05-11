@@ -28,7 +28,7 @@ st.set_page_config(
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/抖音视频数据汇总.xlsx"
 
 # ======================== 加载函数 ========================
-@st.cache_data(ttl=3600, show_spinner="正在从 GitHub 加载数据...")
+@st.cache_data(ttl=180, show_spinner="正在从 GitHub 加载数据...")
 def load_data_from_github(url, max_retries=3):
     for attempt in range(max_retries):
         try:
