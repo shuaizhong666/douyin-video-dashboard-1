@@ -141,7 +141,7 @@ def preprocess_for_analysis(df):
 
 def get_author_aggregation(df):
     """
-    基于预处理后的 df 进行聚合统计，返回包含 姓名、工号、抖音号、作者昵称、发布数量、总点赞数等
+    基于预处理后的 df 进行聚合统计，返回包含 姓名、工号、抖音号、作者昵称、发布数量、总点赞数、总评论数、总收藏数、粉丝数 的 DataFrame
     """
     if df.empty or 'author_group_key' not in df.columns:
         return pd.DataFrame()
@@ -151,8 +151,8 @@ def get_author_aggregation(df):
         '作者昵称': 'first',
         '姓名': 'first',
         '工号': 'first',
-        '抖音号': 'first',      # 新增抖音号字段，仅展示
-        '视频ID': 'count',      # 无效昵称的视频ID为NaN，不会被计数
+        '抖音号': 'first',
+        '视频ID': 'count',
     }
     if '点赞数' in df.columns:
         agg_dict['点赞数'] = 'sum'
@@ -200,10 +200,8 @@ def reorder_columns_with_douyin(df):
     if df.empty or '抖音号' not in df.columns:
         return df
     cols = df.columns.tolist()
-    # 找到工号的位置
     if '工号' in cols:
         idx = cols.index('工号')
-        # 如果抖音号不在工号后第一个，则移动
         if idx+1 >= len(cols) or cols[idx+1] != '抖音号':
             cols.remove('抖音号')
             cols.insert(idx+1, '抖音号')
@@ -258,7 +256,7 @@ def main():
     df_filtered = df_ana[filter_mask].copy()
     raw_filtered = raw_df.loc[filter_mask] if filter_mask.dtype == bool else raw_df.iloc[filter_mask]
 
-    # ======================== 作者双榜 ========================
+    # ======================== 作者双榜 → 三榜 ========================
     st.subheader("👥 作者维度综合排行榜")
     st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效视频ID计数 | 无抖音号员工自动显示昵称为(无抖音号)且各项指标为0")
     author_df = get_author_aggregation(df_filtered)
@@ -272,25 +270,26 @@ def main():
         for col in ['总点赞数', '总评论数', '总收藏数', '粉丝数']:
             if col in author_df.columns:
                 base_cols.append(col)
-        # 确保存在的列
         display_cols_order = [c for c in base_cols if c in author_df.columns]
 
-        tab1, tab2 = st.tabs(["📦 发布数量 Top10", "❤️ 总点赞数 Top10"])
+        # 创建三个标签页
+        tab1, tab2, tab3 = st.tabs(["📦 发布数量 Top10", "❤️ 总点赞数 Top10", "👥 粉丝数 Top10"])
+
         with tab1:
             top_publish = author_df.sort_values('发布数量', ascending=False).head(10)
-            # 调整列顺序
-            top_publish = reorder_columns_with_douyin(top_publish[display_cols_order])
-            st.dataframe(top_publish, width='stretch')
+            top_publish_display = reorder_columns_with_douyin(top_publish[display_cols_order])
+            st.dataframe(top_publish_display, width='stretch')
             fig_pub = px.bar(top_publish, x='作者昵称', y='发布数量',
                              title="发布数量 Top10 作者（括号内为姓名工号）",
                              text_auto=True, color='发布数量',
                              hover_data=['姓名', '工号'])
             st.plotly_chart(fig_pub, use_container_width=True)
+
         with tab2:
             if '总点赞数' in author_df.columns:
                 top_likes = author_df.sort_values('总点赞数', ascending=False).head(10)
-                top_likes = reorder_columns_with_douyin(top_likes[display_cols_order])
-                st.dataframe(top_likes, width='stretch')
+                top_likes_display = reorder_columns_with_douyin(top_likes[display_cols_order])
+                st.dataframe(top_likes_display, width='stretch')
                 fig_likes = px.bar(top_likes, x='作者昵称', y='总点赞数',
                                    title="总点赞数 Top10 作者（括号内为姓名工号）",
                                    text_auto=True, color='总点赞数',
@@ -298,6 +297,19 @@ def main():
                 st.plotly_chart(fig_likes, use_container_width=True)
             else:
                 st.info("数据中不含点赞数，无法展示点赞榜。")
+
+        with tab3:
+            if '粉丝数' in author_df.columns:
+                top_fans = author_df.sort_values('粉丝数', ascending=False).head(10)
+                top_fans_display = reorder_columns_with_douyin(top_fans[display_cols_order])
+                st.dataframe(top_fans_display, width='stretch')
+                fig_fans = px.bar(top_fans, x='作者昵称', y='粉丝数',
+                                  title="粉丝数 Top10 作者（括号内为姓名工号）",
+                                  text_auto=True, color='粉丝数',
+                                  hover_data=['姓名', '工号'])
+                st.plotly_chart(fig_fans, use_container_width=True)
+            else:
+                st.info("数据中不含粉丝数，无法展示粉丝榜。")
     else:
         st.info("未找到作者数据，无法进行作者排行榜分析。")
 
@@ -465,7 +477,6 @@ def main():
         base_cols.append(link_col)
     existing_cols = [c for c in base_cols if c in raw_filtered.columns]
     preview_df = raw_filtered[existing_cols] if existing_cols else raw_filtered.copy()
-    # 调整抖音号位置
     preview_df = reorder_columns_with_douyin(preview_df)
     column_config = {}
     if link_col and link_col in preview_df.columns:
