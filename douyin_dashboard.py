@@ -400,8 +400,9 @@ def main():
             if '抖音号' not in author_status.columns:
                 author_status['抖音号'] = ''
 
+            # 【修改点】调整备注文本为：“该员工抖音号存在问题，请核查是否正确”
             author_status['备注'] = author_status['作者昵称'].apply(
-                lambda x: '⚠️ 无效抖音号，请核查抖音号是否正确' if x == '(无抖音号)' else ''
+                lambda x: '⚠️ 该员工抖音号存在问题，请核查是否正确' if x == '(无抖音号)' else ''
             )
 
             # 调整列顺序：姓名、工号、抖音号、作者昵称、发布数、状态、备注
