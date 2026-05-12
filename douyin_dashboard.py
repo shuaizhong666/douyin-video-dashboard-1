@@ -1,9 +1,3 @@
-"""
-抖音视频数据可视化看板（增强版 - 支持姓名/工号/抖音号，昵称为空自动归零）
-数据源：GitHub 仓库中的 Excel 文件（通过 Raw URL 实时读取）
-运行命令：streamlit run douyin_dashboard.py
-"""
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -102,16 +96,14 @@ def preprocess_for_analysis(df):
 
     # 3. 处理作者昵称：空值或纯空白视为无效
     if '作者昵称' in df_work.columns:
-        # 将可能的NaN、None转为字符串并去除首尾空白
         df_work['作者昵称'] = df_work['作者昵称'].astype(str).str.strip()
-        # 有效条件：既不是空字符串也不是'nan'
         df_work['has_valid_nickname'] = (df_work['作者昵称'] != '') & (df_work['作者昵称'] != 'nan')
     else:
         df_work['作者昵称'] = ''
         df_work['has_valid_nickname'] = False
         st.warning("原始数据中缺少「作者昵称」列，将无法正确识别抖音账号。")
 
-    # 4. 对于无有效昵称的行，强制所有指标为0，并且不计入发布数量（视频ID置为NaN）
+    # 4. 对于无有效昵称的行，强制所有指标为0，不计入发布数量
     invalid_mask = ~df_work['has_valid_nickname']
     if invalid_mask.any():
         for col in num_cols_cn:
@@ -119,23 +111,18 @@ def preprocess_for_analysis(df):
                 df_work.loc[invalid_mask, col] = 0
         if '视频ID' in df_work.columns:
             df_work.loc[invalid_mask, '视频ID'] = np.nan
-        # 无效昵称的统一显示为特殊标记
         df_work.loc[invalid_mask, '作者昵称'] = '(无抖音号)'
 
-    # 5. 创建分组键（关键修复：无效昵称使用「姓名+工号+抖音号」组合，避免错误合并）
-    # 先准备姓名、工号、抖音号字段（缺失值填空字符串）
+    # 5. 创建分组键（避免错误合并）
     name_series = df_work['姓名'].fillna('').astype(str)
     id_series = df_work['工号'].fillna('').astype(str)
     douyin_series = df_work['抖音号'].fillna('').astype(str)
 
-    # 有效昵称：分组键 = 作者昵称（唯一标识一个抖音账号）
     valid_mask = df_work['has_valid_nickname']
     df_work.loc[valid_mask, 'author_group_key'] = df_work.loc[valid_mask, '作者昵称']
 
-    # 无效昵称：分组键 = 姓名_工号_抖音号（保证不同员工/不同抖音号不被错误合并）
     if invalid_mask.any():
         combined_key = name_series + '_' + id_series + '_' + douyin_series
-        # 极端情况：如果三者全都是空，则使用行索引作为唯一后缀，避免合并所有未知员工为一个
         all_empty_mask = (name_series == '') & (id_series == '') & (douyin_series == '') & invalid_mask
         combined_key = combined_key.where(~all_empty_mask, combined_key + '_' + df_work.index.astype(str))
         df_work.loc[invalid_mask, 'author_group_key'] = combined_key.loc[invalid_mask]
@@ -149,13 +136,10 @@ def preprocess_for_analysis(df):
     return df_work
 
 def get_author_aggregation(df):
-    """
-    基于预处理后的 df 进行聚合统计，返回包含 姓名、工号、抖音号、作者昵称、发布数量、总点赞数、总评论数、总收藏数、粉丝数 的 DataFrame
-    """
+    """作者维度聚合统计"""
     if df.empty or 'author_group_key' not in df.columns:
         return pd.DataFrame()
 
-    # 定义聚合字典
     agg_dict = {
         '作者昵称': 'first',
         '姓名': 'first',
@@ -173,22 +157,15 @@ def get_author_aggregation(df):
         agg_dict['粉丝数'] = 'max'
 
     author_stats = df.groupby('author_group_key').agg(agg_dict).reset_index(drop=False)
-    # 重命名为友好中文名
     rename_map = {
         'author_group_key': '分组键',
-        '作者昵称': '作者昵称',
-        '姓名': '姓名',
-        '工号': '工号',
-        '抖音号': '抖音号',
         '视频ID': '发布数量',
         '点赞数': '总点赞数',
         '评论数': '总评论数',
         '收藏数': '总收藏数',
-        '粉丝数': '粉丝数'
     }
     author_stats.rename(columns=rename_map, inplace=True)
 
-    # 补零
     for col in ['发布数量', '总点赞数', '总评论数', '总收藏数', '粉丝数']:
         if col in author_stats.columns:
             author_stats[col] = author_stats[col].fillna(0).astype(int)
@@ -205,7 +182,7 @@ def find_video_link_column(df):
     return None
 
 def reorder_columns_with_douyin(df):
-    """将抖音号列移到工号后面，其他列顺序不变"""
+    """将抖音号列移到工号后面"""
     if df.empty or '抖音号' not in df.columns:
         return df
     cols = df.columns.tolist()
@@ -243,12 +220,13 @@ def main():
                 "选择日期范围",
                 value=(min_date, max_data_date),
                 min_value=min_date,
-                max_value=None
             )
-            if isinstance(date_range, (date, pd.Timestamp)):
-                start_date = end_date = date_range
+            # 修复日期解包报错（核心修复）
+            if len(date_range) == 1:
+                start_date = end_date = date_range[0]
             else:
                 start_date, end_date = date_range
+
             mask = (df_ana['publish_date'].dt.date >= start_date) & (df_ana['publish_date'].dt.date <= end_date)
             filter_mask &= mask
             st.sidebar.info(f"筛选后视频数: {filter_mask.sum()}")
@@ -263,25 +241,19 @@ def main():
                 filter_mask &= mask
 
     df_filtered = df_ana[filter_mask].copy()
-    raw_filtered = raw_df.loc[filter_mask] if filter_mask.dtype == bool else raw_df.iloc[filter_mask]
+    raw_filtered = raw_df.loc[filter_mask]
 
-    # ======================== 作者双榜 → 三榜 ========================
+    # ======================== 作者排行榜 ========================
     st.subheader("👥 作者维度综合排行榜")
     st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效视频ID计数 | 无抖音号员工自动显示昵称为(无抖音号)且各项指标为0")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
-        # 确定展示列顺序（先姓名、工号、抖音号、作者昵称、然后指标）
         base_cols = ['姓名', '工号']
         if '抖音号' in author_df.columns:
             base_cols.append('抖音号')
-        base_cols.append('作者昵称')
-        base_cols.append('发布数量')
-        for col in ['总点赞数', '总评论数', '总收藏数', '粉丝数']:
-            if col in author_df.columns:
-                base_cols.append(col)
+        base_cols.extend(['作者昵称', '发布数量', '总点赞数', '总评论数', '总收藏数', '粉丝数'])
         display_cols_order = [c for c in base_cols if c in author_df.columns]
 
-        # 创建三个标签页
         tab1, tab2, tab3 = st.tabs(["📦 发布数量 Top10", "❤️ 总点赞数 Top10", "👥 粉丝数 Top10"])
 
         with tab1:
@@ -292,7 +264,7 @@ def main():
                              title="发布数量 Top10",
                              text_auto=True, color='发布数量',
                              hover_data=['姓名', '工号'])
-            st.plotly_chart(fig_pub, use_container_width=True)
+            st.plotly_chart(fig_pub, width='stretch')
 
         with tab2:
             if '总点赞数' in author_df.columns:
@@ -303,7 +275,7 @@ def main():
                                    title="总点赞数 Top10",
                                    text_auto=True, color='总点赞数',
                                    hover_data=['姓名', '工号'])
-                st.plotly_chart(fig_likes, use_container_width=True)
+                st.plotly_chart(fig_likes, width='stretch')
             else:
                 st.info("数据中不含点赞数，无法展示点赞榜。")
 
@@ -316,7 +288,7 @@ def main():
                                   title="粉丝数 Top10",
                                   text_auto=True, color='粉丝数',
                                   hover_data=['姓名', '工号'])
-                st.plotly_chart(fig_fans, use_container_width=True)
+                st.plotly_chart(fig_fans, width='stretch')
             else:
                 st.info("数据中不含粉丝数，无法展示粉丝榜。")
     else:
@@ -334,104 +306,59 @@ def main():
             max_date_all = valid_pub.max().date()
             today = date.today()
             yesterday = today - timedelta(days=1)
-            if yesterday > max_date_all:
-                default_single_date = max_date_all
-            elif yesterday < min_date_all:
-                default_single_date = min_date_all
-            else:
-                default_single_date = yesterday
+            default_single_date = yesterday if (yesterday >= min_date_all and yesterday <= max_date_all) else max_date_all
 
-            mode = st.radio(
-                "📅 日期选择模式",
-                ["单天模式", "范围模式"],
-                horizontal=True,
-                key="date_mode"
-            )
+            mode = st.radio("📅 日期选择模式", ["单天模式", "范围模式"], horizontal=True)
 
             if mode == "单天模式":
-                selected_date = st.date_input(
-                    "选择检查日期",
-                    value=default_single_date,
-                    min_value=min_date_all,
-                    max_value=None,
-                    key="single_date"
-                )
+                selected_date = st.date_input("选择检查日期", value=default_single_date, min_value=min_date_all)
                 mask_selected = (df_monitor['publish_date'].dt.date == selected_date)
                 date_desc = selected_date.strftime("%Y-%m-%d")
                 count_label = "当天发布数"
-                title_suffix = f"（{date_desc}）"
             else:
-                date_range = st.date_input(
-                    "选择日期范围",
-                    value=(min_date_all, max_date_all),
-                    min_value=min_date_all,
-                    max_value=None,
-                    key="range_dates"
-                )
-                if isinstance(date_range, (date, pd.Timestamp)):
-                    start_date = end_date = date_range
+                date_range = st.date_input("选择日期范围", value=(min_date_all, max_date_all), min_value=min_date_all)
+                if len(date_range) == 1:
+                    start_date = end_date = date_range[0]
                 else:
                     start_date, end_date = date_range
                 if start_date > end_date:
                     st.error("开始日期不能晚于结束日期")
                     st.stop()
-                mask_selected = (df_monitor['publish_date'].dt.date >= start_date) & \
-                                (df_monitor['publish_date'].dt.date <= end_date)
+                mask_selected = (df_monitor['publish_date'].dt.date >= start_date) & (df_monitor['publish_date'].dt.date <= end_date)
                 date_desc = f"{start_date} 至 {end_date}"
                 count_label = "范围内发布数"
-                title_suffix = f"（{date_desc}）"
 
             selected_videos = df_monitor[mask_selected].copy()
-
-            # 获取所有作者基本信息（分组键、姓名、工号、抖音号、昵称）
             info_cols = ['author_group_key', '姓名', '工号', '作者昵称']
             if '抖音号' in df_monitor.columns:
                 info_cols.append('抖音号')
             all_authors_info = df_monitor[info_cols].drop_duplicates('author_group_key')
 
             if not selected_videos.empty:
-                daily_stats = selected_videos.groupby('author_group_key').agg(
-                    发布数量=('视频ID', 'count')
-                ).reset_index()
+                daily_stats = selected_videos.groupby('author_group_key').agg(发布数量=('视频ID', 'count')).reset_index()
                 author_status = all_authors_info.merge(daily_stats, on='author_group_key', how='left')
             else:
                 author_status = all_authors_info.copy()
                 author_status['发布数量'] = 0
 
             author_status[count_label] = author_status['发布数量'].fillna(0).astype(int)
-            if '发布数量' in author_status.columns:
-                author_status.drop(columns=['发布数量'], inplace=True)
+            author_status.drop(columns=['发布数量'], inplace=True)
             author_status['发布状态'] = author_status[count_label].apply(lambda x: '✅ 有发布' if x > 0 else '❌ 无发布')
+            author_status['备注'] = author_status['作者昵称'].apply(lambda x: '⚠️ 该员工抖音号存在问题，请核查是否正确' if x == '(无抖音号)' else '')
 
-            for col in ['姓名', '工号', '作者昵称']:
-                if col not in author_status.columns:
-                    author_status[col] = ''
-            if '抖音号' not in author_status.columns:
-                author_status['抖音号'] = ''
-
-            # 备注：当作者昵称为'(无抖音号)'时提示核查
-            author_status['备注'] = author_status['作者昵称'].apply(
-                lambda x: '⚠️ 该员工抖音号存在问题，请核查是否正确' if x == '(无抖音号)' else ''
-            )
-
-            # 调整列顺序：姓名、工号、抖音号、作者昵称、发布数、状态、备注
             display_cols = ['姓名', '工号']
             if '抖音号' in author_status.columns:
                 display_cols.append('抖音号')
             display_cols.extend(['作者昵称', count_label, '发布状态', '备注'])
             author_status = author_status[[c for c in display_cols if c in author_status.columns]]
 
-            filter_option = st.radio(
-                "筛选作者：",
-                ["全部作者", f"仅无发布作者 ({count_label}=0)", f"仅有发布作者 ({count_label}>0)"],
-                horizontal=True
-            )
+            filter_option = st.radio("筛选作者：", ["全部作者", f"仅无发布作者 ({count_label}=0)", f"仅有发布作者 ({count_label}>0)"], horizontal=True)
             if filter_option == f"仅无发布作者 ({count_label}=0)":
                 author_status = author_status[author_status[count_label] == 0]
             elif filter_option == f"仅有发布作者 ({count_label}>0)":
                 author_status = author_status[author_status[count_label] > 0]
 
-            st.write(f"### 作者发布统计 {title_suffix}")
+            st.write(f"### 作者发布统计（{date_desc}）")
             st.dataframe(author_status, width='stretch')
 
             total_authors = len(all_authors_info)
@@ -443,35 +370,19 @@ def main():
                 with st.expander("📹 点击查看视频详情（验证发布数量）"):
                     author_list = sorted(selected_videos['author_group_key'].unique())
                     if author_list:
-                        author_display = {}
-                        for key in author_list:
-                            row = selected_videos[selected_videos['author_group_key'] == key].iloc[0]
-                            author_display[key] = f"{row['姓名']}({row['工号']}) - {row['作者昵称']}"
-                        selected_display = st.selectbox("选择作者查看其发布的视频", options=author_list, format_func=lambda x: author_display[x], key="author_detail")
-                        author_videos = selected_videos[selected_videos['author_group_key'] == selected_display].copy()
-                        author_videos = author_videos.sort_values('publish_date', ascending=False)
-                        st.write(f"**{author_display[selected_display]}** 在 {date_desc} 发布了 {len(author_videos)} 个视频：")
+                        author_display = {key: f"{row['姓名']}({row['工号']}) - {row['作者昵称']}" for key, row in selected_videos.groupby('author_group_key').first().iterrows()}
+                        selected_display = st.selectbox("选择作者查看其发布的视频", options=author_list, format_func=lambda x: author_display[x])
+                        author_videos = selected_videos[selected_videos['author_group_key'] == selected_display].sort_values('publish_date', ascending=False)
 
                         display_cols = []
-                        if '视频ID' in author_videos.columns:
-                            display_cols.append('视频ID')
-                        if '视频描述' in author_videos.columns:
-                            display_cols.append('视频描述')
-                        if '创建时间' in author_videos.columns:
-                            display_cols.append('创建时间')
-                        if link_col and link_col in author_videos.columns:
-                            display_cols.append(link_col)
-                        if not display_cols:
-                            display_cols = author_videos.columns.tolist()
-                        # 显示姓名、工号、抖音号在前
+                        for col in ['视频ID', '视频描述', '创建时间', link_col]:
+                            if col in author_videos.columns:
+                                display_cols.append(col)
                         for prefix in ['姓名', '工号', '抖音号']:
                             if prefix in author_videos.columns and prefix not in display_cols:
                                 display_cols.insert(0, prefix)
-                        display_cols = list(dict.fromkeys(display_cols))
 
-                        column_config = {}
-                        if link_col and link_col in author_videos.columns:
-                            column_config[link_col] = st.column_config.LinkColumn("视频链接", width="small", help="点击跳转")
+                        column_config = {link_col: st.column_config.LinkColumn("视频链接")} if link_col else {}
                         st.dataframe(author_videos[display_cols], column_config=column_config, width='stretch')
             else:
                 st.info("所选日期范围内没有作者发布视频。")
@@ -486,16 +397,11 @@ def main():
     if link_col:
         base_cols.append(link_col)
     existing_cols = [c for c in base_cols if c in raw_filtered.columns]
-    preview_df = raw_filtered[existing_cols] if existing_cols else raw_filtered.copy()
-    preview_df = reorder_columns_with_douyin(preview_df)
-    column_config = {}
-    if link_col and link_col in preview_df.columns:
-        column_config[link_col] = st.column_config.LinkColumn("视频链接", width="small", help="点击跳转")
+    preview_df = reorder_columns_with_douyin(raw_filtered[existing_cols])
+    column_config = {link_col: st.column_config.LinkColumn("视频链接")} if link_col else {}
+
     show_all = st.checkbox("显示全部数据（默认仅显示前100行）")
-    if show_all:
-        st.dataframe(preview_df, column_config=column_config, width='stretch')
-    else:
-        st.dataframe(preview_df.head(100), column_config=column_config, width='stretch')
+    st.dataframe(preview_df if show_all else preview_df.head(100), column_config=column_config, width='stretch')
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("📌 说明")
