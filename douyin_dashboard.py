@@ -1,5 +1,5 @@
 """
-抖音视频数据可视化看板（增强版 - 支持姓名/工号，昵称为空自动归零）
+抖音视频数据可视化看板（增强版 - 支持姓名/工号/抖音号，昵称为空自动归零）
 数据源：GitHub 仓库中的 Excel 文件（通过 Raw URL 实时读取）
 运行命令：streamlit run douyin_dashboard.py
 """
@@ -27,7 +27,6 @@ st.set_page_config(
 
 # ======================== 数据源配置 ========================
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/抖音视频数据汇总.xlsx"
-
 
 # ======================== 加载函数 ========================
 @st.cache_data(ttl=180, show_spinner="正在从 GitHub 加载数据...")
@@ -67,16 +66,16 @@ def load_data_from_github(url, max_retries=3):
                     st.error(f"临时文件读取失败: {e2}")
                     raise e2
         except Exception as e:
-            st.error(f"加载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            st.error(f"加载失败 (尝试 {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return pd.DataFrame()
     return pd.DataFrame()
-
 
 def preprocess_for_analysis(df):
     """
     预处理：转换数值类型、解析日期、处理昵称空值、添加姓名/工号兜底、创建分组键
     对于无效昵称（为空或纯空白），强制所有指标为0，视频ID置NaN，不计入发布数量。
+    抖音号字段仅用于展示，不参与归零逻辑。
     """
     if df.empty:
         return df
@@ -89,6 +88,11 @@ def preprocess_for_analysis(df):
     if '工号' not in df_work.columns:
         df_work['工号'] = ''
         st.info("⚠️ 原始数据中缺少「工号」列，已在看板中补空白，请后续补充映射关系。")
+
+    # 1.1 确保抖音号列存在（若无则补空白，仅用于展示）
+    if '抖音号' not in df_work.columns:
+        df_work['抖音号'] = ''
+        st.info("⚠️ 原始数据中缺少「抖音号」列，已补空白，仅供展示。")
 
     # 2. 数值列转换，缺失填充0
     num_cols_cn = ['点赞数', '评论数', '分享数', '收藏数', '粉丝数', '获赞总数']
@@ -135,10 +139,9 @@ def preprocess_for_analysis(df):
 
     return df_work
 
-
 def get_author_aggregation(df):
     """
-    基于预处理后的 df 进行聚合统计，返回包含 姓名、工号、作者昵称、发布数量、总点赞数、总评论数、总收藏数、粉丝数 的 DataFrame
+    基于预处理后的 df 进行聚合统计，返回包含 姓名、工号、抖音号、作者昵称、发布数量、总点赞数、总评论数、总收藏数、粉丝数 的 DataFrame
     """
     if df.empty or 'author_group_key' not in df.columns:
         return pd.DataFrame()
@@ -148,7 +151,8 @@ def get_author_aggregation(df):
         '作者昵称': 'first',
         '姓名': 'first',
         '工号': 'first',
-        '视频ID': 'count',  # 无效昵称的视频ID为NaN，不会被计数
+        '抖音号': 'first',
+        '视频ID': 'count',
     }
     if '点赞数' in df.columns:
         agg_dict['点赞数'] = 'sum'
@@ -159,13 +163,14 @@ def get_author_aggregation(df):
     if '粉丝数' in df.columns:
         agg_dict['粉丝数'] = 'max'
 
-    author_stats = df.groupby('author_group_key').agg(agg_dict).reset_index(drop=False)  # 保留分组键列
+    author_stats = df.groupby('author_group_key').agg(agg_dict).reset_index(drop=False)
     # 重命名为友好中文名
     rename_map = {
         'author_group_key': '分组键',
         '作者昵称': '作者昵称',
         '姓名': '姓名',
         '工号': '工号',
+        '抖音号': '抖音号',
         '视频ID': '发布数量',
         '点赞数': '总点赞数',
         '评论数': '总评论数',
@@ -183,7 +188,6 @@ def get_author_aggregation(df):
 
     return author_stats
 
-
 def find_video_link_column(df):
     possible_names = ['视频链接', '链接', '分享链接', 'video_link', 'url', 'link']
     for col in df.columns:
@@ -191,21 +195,32 @@ def find_video_link_column(df):
             return col
     return None
 
+def reorder_columns_with_douyin(df):
+    """将抖音号列移到工号后面，其他列顺序不变"""
+    if df.empty or '抖音号' not in df.columns:
+        return df
+    cols = df.columns.tolist()
+    if '工号' in cols:
+        idx = cols.index('工号')
+        if idx+1 >= len(cols) or cols[idx+1] != '抖音号':
+            cols.remove('抖音号')
+            cols.insert(idx+1, '抖音号')
+    return df[cols]
 
 # ======================== 主界面 ========================
 def main():
     st.title("🎵 抖音视频数据可视化看板")
-    st.markdown(f"**数据源**：GitHub 仓库（实时同步） | 支持姓名/工号展示，无抖音号员工自动归零")
+    st.markdown(f"**数据源**：GitHub 仓库（实时同步） | 支持姓名/工号/抖音号展示，无抖音号员工自动归零")
 
     raw_df = load_data_from_github(GITHUB_RAW_URL)
     if raw_df.empty:
         st.stop()
 
-    # 预处理（已包含姓名/工号、昵称空值处理、分组键等）
+    # 预处理
     df_ana = preprocess_for_analysis(raw_df)
     link_col = find_video_link_column(raw_df)
 
-    # 侧边栏全局筛选（基于原始未聚合数据）
+    # 侧边栏全局筛选
     st.sidebar.header("🔍 全局数据筛选")
     st.sidebar.markdown(f"**原始视频数**: {len(df_ana)}")
     filter_mask = pd.Series([True] * len(df_ana))
@@ -241,54 +256,67 @@ def main():
     df_filtered = df_ana[filter_mask].copy()
     raw_filtered = raw_df.loc[filter_mask] if filter_mask.dtype == bool else raw_df.iloc[filter_mask]
 
-    # ======================== 作者双榜（含姓名工号，工号后显示抖音号） ========================
+    # ======================== 作者双榜 → 三榜 ========================
     st.subheader("👥 作者维度综合排行榜")
-    st.caption(
-        "以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效视频ID计数 | 无抖音号员工自动显示昵称为(无抖音号)且各项指标为0 | 工号后括号内为抖音号")
+    st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效视频ID计数 | 无抖音号员工自动显示昵称为(无抖音号)且各项指标为0")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
-        # 修改工号列显示：工号（抖音号）
-        author_df['工号'] = author_df['工号'].astype(str) + ' (' + author_df['作者昵称'] + ')'
+        # 确定展示列顺序（先姓名、工号、抖音号、作者昵称、然后指标）
+        base_cols = ['姓名', '工号']
+        if '抖音号' in author_df.columns:
+            base_cols.append('抖音号')
+        base_cols.append('作者昵称')
+        base_cols.append('发布数量')
+        for col in ['总点赞数', '总评论数', '总收藏数', '粉丝数']:
+            if col in author_df.columns:
+                base_cols.append(col)
+        display_cols_order = [c for c in base_cols if c in author_df.columns]
 
-        # 确定展示顺序
-        display_cols_order = ['姓名', '工号', '作者昵称', '发布数量']
-        if '总点赞数' in author_df.columns:
-            display_cols_order.append('总点赞数')
-        if '总评论数' in author_df.columns:
-            display_cols_order.append('总评论数')
-        if '总收藏数' in author_df.columns:
-            display_cols_order.append('总收藏数')
-        if '粉丝数' in author_df.columns:
-            display_cols_order.append('粉丝数')
+        # 创建三个标签页
+        tab1, tab2, tab3 = st.tabs(["📦 发布数量 Top10", "❤️ 总点赞数 Top10", "👥 粉丝数 Top10"])
 
-        tab1, tab2 = st.tabs(["📦 发布数量 Top10", "❤️ 总点赞数 Top10"])
         with tab1:
             top_publish = author_df.sort_values('发布数量', ascending=False).head(10)
-            st.dataframe(top_publish[display_cols_order], width='stretch')
+            top_publish_display = reorder_columns_with_douyin(top_publish[display_cols_order])
+            st.dataframe(top_publish_display, width='stretch')
             fig_pub = px.bar(top_publish, x='作者昵称', y='发布数量',
-                             title="发布数量 Top10 作者",
+                             title="发布数量 Top10",
                              text_auto=True, color='发布数量',
-                             hover_data={'姓名': True, '工号': True})
+                             hover_data=['姓名', '工号'])
             st.plotly_chart(fig_pub, use_container_width=True)
+
         with tab2:
             if '总点赞数' in author_df.columns:
                 top_likes = author_df.sort_values('总点赞数', ascending=False).head(10)
-                st.dataframe(top_likes[display_cols_order], width='stretch')
+                top_likes_display = reorder_columns_with_douyin(top_likes[display_cols_order])
+                st.dataframe(top_likes_display, width='stretch')
                 fig_likes = px.bar(top_likes, x='作者昵称', y='总点赞数',
-                                   title="总点赞数 Top10 作者",
+                                   title="总点赞数 Top10",
                                    text_auto=True, color='总点赞数',
-                                   hover_data={'姓名': True, '工号': True})
+                                   hover_data=['姓名', '工号'])
                 st.plotly_chart(fig_likes, use_container_width=True)
             else:
                 st.info("数据中不含点赞数，无法展示点赞榜。")
+
+        with tab3:
+            if '粉丝数' in author_df.columns:
+                top_fans = author_df.sort_values('粉丝数', ascending=False).head(10)
+                top_fans_display = reorder_columns_with_douyin(top_fans[display_cols_order])
+                st.dataframe(top_fans_display, width='stretch')
+                fig_fans = px.bar(top_fans, x='作者昵称', y='粉丝数',
+                                  title="粉丝数 Top10",
+                                  text_auto=True, color='粉丝数',
+                                  hover_data=['姓名', '工号'])
+                st.plotly_chart(fig_fans, use_container_width=True)
+            else:
+                st.info("数据中不含粉丝数，无法展示粉丝榜。")
     else:
         st.info("未找到作者数据，无法进行作者排行榜分析。")
 
-    # ======================== 单日/范围发布监控（工号后显示抖音号） ========================
+    # ======================== 发布监控 ========================
     st.subheader("🔍 发布监控（支持单日或日期范围）")
-    st.caption("基于原始全量数据统计，不受左侧筛选影响。无抖音号员工（昵称为空）发布数量恒为0。工号后括号内为抖音号。")
+    st.caption("基于原始全量数据统计，不受左侧筛选影响。无抖音号员工（昵称为空）发布数量恒为0。")
 
-    # 对原始数据做同样的预处理，得到发布监控专用 DataFrame
     df_monitor = preprocess_for_analysis(raw_df.copy())
     if 'publish_date' in df_monitor.columns and 'author_group_key' in df_monitor.columns:
         valid_pub = df_monitor['publish_date'].dropna()
@@ -346,45 +374,44 @@ def main():
 
             selected_videos = df_monitor[mask_selected].copy()
 
-            # 获取所有作者基本信息（分组键、姓名、工号、昵称）
-            all_authors_info = df_monitor[['author_group_key', '姓名', '工号', '作者昵称']].drop_duplicates(
-                'author_group_key')
+            # 获取所有作者基本信息（分组键、姓名、工号、抖音号、昵称）
+            info_cols = ['author_group_key', '姓名', '工号', '作者昵称']
+            if '抖音号' in df_monitor.columns:
+                info_cols.append('抖音号')
+            all_authors_info = df_monitor[info_cols].drop_duplicates('author_group_key')
 
             if not selected_videos.empty:
-                # 统计每个分组键的发布数量（视频ID非空的数量）
                 daily_stats = selected_videos.groupby('author_group_key').agg(
                     发布数量=('视频ID', 'count')
-                ).reset_index()  # 保留 author_group_key 列
-                # 合并
+                ).reset_index()
                 author_status = all_authors_info.merge(daily_stats, on='author_group_key', how='left')
             else:
-                # 没有视频发布，直接基于 all_authors_info 构造，发布数量为0
                 author_status = all_authors_info.copy()
                 author_status['发布数量'] = 0
 
-            # 添加发布数字段（兼容可能缺失）
             author_status[count_label] = author_status['发布数量'].fillna(0).astype(int)
             if '发布数量' in author_status.columns:
                 author_status.drop(columns=['发布数量'], inplace=True)
             author_status['发布状态'] = author_status[count_label].apply(lambda x: '✅ 有发布' if x > 0 else '❌ 无发布')
 
-            # 确保必要的列存在（姓名、工号、作者昵称）
             for col in ['姓名', '工号', '作者昵称']:
                 if col not in author_status.columns:
                     author_status[col] = ''
+            if '抖音号' not in author_status.columns:
+                author_status['抖音号'] = ''
 
-            # 修改工号显示：工号（抖音号）
-            author_status['工号'] = author_status['工号'].astype(str) + ' (' + author_status['作者昵称'] + ')'
-
-            # 添加备注列：如果作者昵称为'(无抖音号)'，则显示提示
+            # 【修改点】调整备注文本为：“该员工抖音号存在问题，请核查是否正确”
             author_status['备注'] = author_status['作者昵称'].apply(
-                lambda x: '⚠️ 无效抖音号，请核查抖音号是否正确' if x == '(无抖音号)' else ''
+                lambda x: '⚠️ 该员工抖音号存在问题，请核查是否正确' if x == '(无抖音号)' else ''
             )
 
-            # 调整列顺序（备注放在发布状态后面）
-            author_status = author_status[['姓名', '工号', '作者昵称', count_label, '发布状态', '备注']]
+            # 调整列顺序：姓名、工号、抖音号、作者昵称、发布数、状态、备注
+            display_cols = ['姓名', '工号']
+            if '抖音号' in author_status.columns:
+                display_cols.append('抖音号')
+            display_cols.extend(['作者昵称', count_label, '发布状态', '备注'])
+            author_status = author_status[[c for c in display_cols if c in author_status.columns]]
 
-            # 筛选
             filter_option = st.radio(
                 "筛选作者：",
                 ["全部作者", f"仅无发布作者 ({count_label}=0)", f"仅有发布作者 ({count_label}>0)"],
@@ -401,32 +428,21 @@ def main():
             total_authors = len(all_authors_info)
             published_authors = (author_status[count_label] > 0).sum() if not author_status.empty else 0
             total_videos = author_status[count_label].sum() if not author_status.empty else 0
-            st.info(
-                f"📊 **摘要**：共 {total_authors} 位作者，其中 {published_authors} 位有发布，合计发布 {total_videos} 个视频。")
+            st.info(f"📊 **摘要**：共 {total_authors} 位作者，其中 {published_authors} 位有发布，合计发布 {total_videos} 个视频。")
 
-            # 查看视频详情
             if not selected_videos.empty:
                 with st.expander("📹 点击查看视频详情（验证发布数量）"):
                     author_list = sorted(selected_videos['author_group_key'].unique())
                     if author_list:
-                        # 构造显示映射（姓名+工号（抖音号））
                         author_display = {}
                         for key in author_list:
                             row = selected_videos[selected_videos['author_group_key'] == key].iloc[0]
-                            # 在显示时也将工号加上抖音号
-                            display_gonghao = f"{row['工号']} ({row['作者昵称']})"
-                            author_display[key] = f"{row['姓名']} - {display_gonghao}"
-                        selected_display = st.selectbox("选择作者查看其发布的视频", options=author_list,
-                                                        format_func=lambda x: author_display[x], key="author_detail")
+                            author_display[key] = f"{row['姓名']}({row['工号']}) - {row['作者昵称']}"
+                        selected_display = st.selectbox("选择作者查看其发布的视频", options=author_list, format_func=lambda x: author_display[x], key="author_detail")
                         author_videos = selected_videos[selected_videos['author_group_key'] == selected_display].copy()
                         author_videos = author_videos.sort_values('publish_date', ascending=False)
-                        st.write(
-                            f"**{author_display[selected_display]}** 在 {date_desc} 发布了 {len(author_videos)} 个视频：")
+                        st.write(f"**{author_display[selected_display]}** 在 {date_desc} 发布了 {len(author_videos)} 个视频：")
 
-                        # 对视频详情表中的工号列进行格式化（直接在原列上修改）
-                        author_videos['工号'] = author_videos['工号'].astype(str) + ' (' + author_videos[
-                            '作者昵称'] + ')'
-                        # 选择要显示的列
                         display_cols = []
                         if '视频ID' in author_videos.columns:
                             display_cols.append('视频ID')
@@ -438,14 +454,15 @@ def main():
                             display_cols.append(link_col)
                         if not display_cols:
                             display_cols = author_videos.columns.tolist()
-                        # 确保姓名、工号在前
-                        if '姓名' in author_videos.columns:
-                            display_cols = ['姓名', '工号'] + [c for c in display_cols if c not in ['姓名', '工号']]
+                        # 显示姓名、工号、抖音号在前
+                        for prefix in ['姓名', '工号', '抖音号']:
+                            if prefix in author_videos.columns and prefix not in display_cols:
+                                display_cols.insert(0, prefix)
+                        display_cols = list(dict.fromkeys(display_cols))
 
                         column_config = {}
                         if link_col and link_col in author_videos.columns:
-                            column_config[link_col] = st.column_config.LinkColumn("视频链接", width="small",
-                                                                                  help="点击跳转")
+                            column_config[link_col] = st.column_config.LinkColumn("视频链接", width="small", help="点击跳转")
                         st.dataframe(author_videos[display_cols], column_config=column_config, width='stretch')
             else:
                 st.info("所选日期范围内没有作者发布视频。")
@@ -454,16 +471,14 @@ def main():
     else:
         st.info("原始数据缺少'创建时间'或'作者昵称'列，无法进行发布监控。")
 
-    # ======================== 原始数据预览（工号后显示抖音号） ========================
+    # ======================== 原始数据预览 ========================
     st.subheader("📄 原始数据预览（应用全局筛选后）")
-    base_cols = ['姓名', '工号', '作者昵称', '视频描述', '点赞数', '评论数', '分享数', '收藏数', '粉丝数', '创建时间']
+    base_cols = ['姓名', '工号', '抖音号', '作者昵称', '视频描述', '点赞数', '评论数', '分享数', '收藏数', '粉丝数', '创建时间']
     if link_col:
         base_cols.append(link_col)
     existing_cols = [c for c in base_cols if c in raw_filtered.columns]
     preview_df = raw_filtered[existing_cols] if existing_cols else raw_filtered.copy()
-    # 修改工号显示
-    if '工号' in preview_df.columns and '作者昵称' in preview_df.columns:
-        preview_df['工号'] = preview_df['工号'].astype(str) + ' (' + preview_df['作者昵称'] + ')'
+    preview_df = reorder_columns_with_douyin(preview_df)
     column_config = {}
     if link_col and link_col in preview_df.columns:
         column_config[link_col] = st.column_config.LinkColumn("视频链接", width="small", help="点击跳转")
@@ -476,13 +491,11 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("📌 说明")
     st.sidebar.info(
-        "**姓名/工号**：从Excel中读取，若缺失则显示空白。工号后括号内为对应的抖音号（作者昵称）。\n\n"
+        "**姓名/工号/抖音号**：从Excel中读取，若缺失则显示空白。\n\n"
         "**无抖音号员工**：当「作者昵称」为空时，该员工所有指标自动为0，且发布数量不计入任何统计。\n\n"
         "**发布数量定义**：有效抖音号的视频ID计数。\n\n"
         "**发布监控**：支持单天或范围模式，默认显示昨日数据。\n\n"
         "**视频链接**：若Excel中包含‘视频链接’等列，自动显示可点击链接。"
     )
-
-
 if __name__ == "__main__":
     main()
