@@ -73,9 +73,9 @@ def load_data_from_github(url, max_retries=3):
 
 def preprocess_for_analysis(df):
     """
-    预处理：转换数值类型、解析日期、处理昵称空值、添加姓名/工号兜底、创建分组键
+    预处理：转换数值类型、解析日期、处理昵称空值、添加姓名/工号/抖音号兜底、创建分组键
     对于无效昵称（为空或纯空白），强制所有指标为0，视频ID置NaN，不计入发布数量。
-    抖音号字段仅用于展示，不参与归零逻辑。
+    抖音号字段用于辅助区分无效昵称的作者（避免错误合并）。
     """
     if df.empty:
         return df
@@ -89,10 +89,10 @@ def preprocess_for_analysis(df):
         df_work['工号'] = ''
         st.info("⚠️ 原始数据中缺少「工号」列，已在看板中补空白，请后续补充映射关系。")
 
-    # 1.1 确保抖音号列存在（若无则补空白，仅用于展示）
+    # 1.1 确保抖音号列存在（若无则补空白，用于辅助区分无效昵称的作者）
     if '抖音号' not in df_work.columns:
         df_work['抖音号'] = ''
-        st.info("⚠️ 原始数据中缺少「抖音号」列，已补空白，仅供展示。")
+        st.info("⚠️ 原始数据中缺少「抖音号」列，已补空白，仅供展示与辅助区分。")
 
     # 2. 数值列转换，缺失填充0
     num_cols_cn = ['点赞数', '评论数', '分享数', '收藏数', '粉丝数', '获赞总数']
@@ -102,7 +102,9 @@ def preprocess_for_analysis(df):
 
     # 3. 处理作者昵称：空值或纯空白视为无效
     if '作者昵称' in df_work.columns:
+        # 将可能的NaN、None转为字符串并去除首尾空白
         df_work['作者昵称'] = df_work['作者昵称'].astype(str).str.strip()
+        # 有效条件：既不是空字符串也不是'nan'
         df_work['has_valid_nickname'] = (df_work['作者昵称'] != '') & (df_work['作者昵称'] != 'nan')
     else:
         df_work['作者昵称'] = ''
@@ -117,19 +119,26 @@ def preprocess_for_analysis(df):
                 df_work.loc[invalid_mask, col] = 0
         if '视频ID' in df_work.columns:
             df_work.loc[invalid_mask, '视频ID'] = np.nan
-        # 无效昵称的统一显示为特殊标记，同时创建分组键避免合并
+        # 无效昵称的统一显示为特殊标记
         df_work.loc[invalid_mask, '作者昵称'] = '(无抖音号)'
 
-    # 5. 创建分组键：有有效昵称则用昵称，无效昵称则用「姓名+工号」组合（确保每个员工独立）
-    df_work['author_group_key'] = df_work['作者昵称']
+    # 5. 创建分组键（关键修复：无效昵称使用「姓名+工号+抖音号」组合，避免错误合并）
+    # 先准备姓名、工号、抖音号字段（缺失值填空字符串）
+    name_series = df_work['姓名'].fillna('').astype(str)
+    id_series = df_work['工号'].fillna('').astype(str)
+    douyin_series = df_work['抖音号'].fillna('').astype(str)
+
+    # 有效昵称：分组键 = 作者昵称（唯一标识一个抖音账号）
+    valid_mask = df_work['has_valid_nickname']
+    df_work.loc[valid_mask, 'author_group_key'] = df_work.loc[valid_mask, '作者昵称']
+
+    # 无效昵称：分组键 = 姓名_工号_抖音号（保证不同员工/不同抖音号不被错误合并）
     if invalid_mask.any():
-        # 安全拼接：将姓名和工号转为字符串，缺失值替换为空字符串
-        name_series = df_work.loc[invalid_mask, '姓名'].astype(str).fillna('')
-        id_series = df_work.loc[invalid_mask, '工号'].astype(str).fillna('')
-        df_work.loc[invalid_mask, 'author_group_key'] = name_series + '_' + id_series
-        # 如果姓名工号都为空，则使用行索引作为唯一标识
-        empty_key_mask = (df_work['author_group_key'] == '_') & invalid_mask
-        df_work.loc[empty_key_mask, 'author_group_key'] = df_work.loc[empty_key_mask].index.astype(str)
+        combined_key = name_series + '_' + id_series + '_' + douyin_series
+        # 极端情况：如果三者全都是空，则使用行索引作为唯一后缀，避免合并所有未知员工为一个
+        all_empty_mask = (name_series == '') & (id_series == '') & (douyin_series == '') & invalid_mask
+        combined_key = combined_key.where(~all_empty_mask, combined_key + '_' + df_work.index.astype(str))
+        df_work.loc[invalid_mask, 'author_group_key'] = combined_key.loc[invalid_mask]
 
     # 6. 解析发布日期
     if '创建时间' in df_work.columns:
@@ -210,7 +219,7 @@ def reorder_columns_with_douyin(df):
 # ======================== 主界面 ========================
 def main():
     st.title("🎵 抖音视频数据可视化看板")
-    st.markdown(f"**数据源**：GitHub 仓库（实时同步） | 支持姓名/工号/抖音号展示，无抖音号员工自动归零")
+    st.markdown(f"**数据源**：GitHub 仓库（实时同步） | 支持姓名/工号/抖音号，无抖音号员工自动归零")
 
     raw_df = load_data_from_github(GITHUB_RAW_URL)
     if raw_df.empty:
@@ -400,7 +409,7 @@ def main():
             if '抖音号' not in author_status.columns:
                 author_status['抖音号'] = ''
 
-            # 【修改点】调整备注文本为：“该员工抖音号存在问题，请核查是否正确”
+            # 备注：当作者昵称为'(无抖音号)'时提示核查
             author_status['备注'] = author_status['作者昵称'].apply(
                 lambda x: '⚠️ 该员工抖音号存在问题，请核查是否正确' if x == '(无抖音号)' else ''
             )
@@ -497,5 +506,6 @@ def main():
         "**发布监控**：支持单天或范围模式，默认显示昨日数据。\n\n"
         "**视频链接**：若Excel中包含‘视频链接’等列，自动显示可点击链接。"
     )
+
 if __name__ == "__main__":
     main()
