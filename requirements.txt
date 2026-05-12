@@ -4,4 +4,3 @@ plotly
 requests
 openpyxl
 numpy
-tempfile
