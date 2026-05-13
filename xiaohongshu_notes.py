@@ -310,7 +310,7 @@ def main():
     st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效笔记ID计数 | 获赞与收藏数为作者主页总获赞收藏数")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
-        display_cols_order = ['姓名', '工号', '小红书号', '用户昵称', '发布数量', '获赞与收藏数', '粉丝数']
+        display_cols_order = ['姓名', '工号', '小红书号', '用户昵称', '获赞与收藏数', '粉丝数']
         display_cols_order = [c for c in display_cols_order if c in author_df.columns]
 
         # 只保留两个 Tab：🔥 获赞与收藏数 Top10，👥 粉丝数 Top10
