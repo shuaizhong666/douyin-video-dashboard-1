@@ -463,7 +463,7 @@ def main():
         preview_df['关注数'] = 0
 
     base_cols = ['姓名', '工号', '小红书号', '用户昵称', '笔记标题', '点赞数','收藏数', '评论数', '分享数',
-                 '获赞与收藏数', '粉丝数', '关注数', '发布日期']
+                 '获赞与收藏数', '粉丝数', '发布日期']
     if link_col:
         base_cols.append(link_col)
     existing_cols = [c for c in base_cols if c in preview_df.columns]
