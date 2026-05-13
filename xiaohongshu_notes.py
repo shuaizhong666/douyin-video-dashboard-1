@@ -1,6 +1,7 @@
 """
-小红书笔记数据可视化看板（增强版）
-数据源：GitHub 仓库中的 Excel 文件（通过 Raw URL 实时读取）
+小红书笔记数据可视化看板（增强版 - 支持多表合并去重，已去除发布数量榜）
+数据源：GitHub 仓库中的两个 Excel 文件（原始底表 + 新增表）
+       通过 Raw URL 实时读取，合并后根据「笔记ID」去重（保留后出现的记录）
 运行命令：streamlit run xiaohongshu_dashboard.py
 字段说明：获赞与收藏数（Excel 中作者主页总获赞收藏数，聚合取 max）
 """
@@ -27,11 +28,13 @@ st.set_page_config(
 )
 
 # ======================== 数据源配置 ========================
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/小红书笔记数据.xlsx"
+GITHUB_BASE_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/小红书笔记数据.xlsx"
+GITHUB_NEW_URL = "https://raw.githubusercontent.com/shuaizhong666/douyin-video-dashboard-1/main/小红书笔记数据新增.xlsx"
 
-# ======================== 加载函数 ========================
-@st.cache_data(ttl=180, show_spinner="正在从 GitHub 加载小红书数据...")
-def load_data_from_github(url, max_retries=3):
+# ======================== 加载函数（支持单文件） ========================
+@st.cache_data(ttl=180, show_spinner="正在从 GitHub 加载数据...")
+def load_single_excel_from_github(url, max_retries=3):
+    """加载单个 Excel 文件（内部使用，带重试机制）"""
     for attempt in range(max_retries):
         try:
             random_param = f"?_={int(datetime.now().timestamp())}" if attempt > 0 else ""
@@ -42,36 +45,79 @@ def load_data_from_github(url, max_retries=3):
             content = response.content
             try:
                 df = pd.read_excel(BytesIO(content), engine='openpyxl')
-                if df.empty:
-                    st.warning("Excel 文件读取成功，但数据为空。")
-                else:
-                    st.success(f"✅ 数据加载成功，共 {len(df)} 条笔记记录")
                 return df
             except Exception as e1:
-                st.warning(f"pandas 直接读取失败: {e1}")
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                        tmp.write(content)
-                        tmp_path = tmp.name
-                    from openpyxl import load_workbook
-                    wb = load_workbook(tmp_path, read_only=True)
-                    sheet = wb.active
-                    data = sheet.values
-                    cols = next(data)
-                    df = pd.DataFrame(data, columns=cols)
-                    wb.close()
-                    os.unlink(tmp_path)
-                    st.success("✅ 通过 openpyxl 直接加载成功")
-                    return df
-                except Exception as e2:
-                    st.error(f"临时文件读取失败: {e2}")
-                    raise e2
+                # 降级：通过 openpyxl 直接读取
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                from openpyxl import load_workbook
+                wb = load_workbook(tmp_path, read_only=True)
+                sheet = wb.active
+                data = sheet.values
+                cols = next(data)
+                df = pd.DataFrame(data, columns=cols)
+                wb.close()
+                os.unlink(tmp_path)
+                return df
         except Exception as e:
-            st.error(f"加载失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            st.warning(f"加载 {url} 失败 (尝试 {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return pd.DataFrame()
     return pd.DataFrame()
 
+@st.cache_data(ttl=180, show_spinner="正在合并并去重小红书数据...")
+def load_combined_data():
+    """
+    加载底表与新增表，合并后基于「笔记ID」去重（保留最后出现的记录）
+    返回合并后的 DataFrame
+    """
+    # 加载底表
+    df_base = load_single_excel_from_github(GITHUB_BASE_URL)
+    if df_base.empty:
+        st.error("❌ 无法加载底表数据，请检查网络或文件地址。")
+        return pd.DataFrame()
+    st.info(f"📊 底表加载成功：{len(df_base)} 条记录")
+
+    # 加载新增表（如果失败仅给出警告，仍使用底表）
+    df_new = load_single_excel_from_github(GITHUB_NEW_URL)
+    if df_new.empty:
+        st.warning("⚠️ 未找到或无法加载「小红书笔记数据新增.xlsx」，仅使用底表数据。")
+        combined_df = df_base.copy()
+    else:
+        st.info(f"➕ 新增表加载成功：{len(df_new)} 条记录")
+        combined_df = pd.concat([df_base, df_new], ignore_index=True)
+        st.info(f"🔄 合并后总记录数：{len(combined_df)} 条")
+
+    # 去重：基于「笔记ID」，保留最后出现的记录（即新增表中同ID覆盖底表）
+    note_id_col = None
+    possible_id_names = ['笔记ID', '笔记id', 'note_id', 'ID', 'id']
+    for col in possible_id_names:
+        if col in combined_df.columns:
+            note_id_col = col
+            break
+
+    if note_id_col is not None:
+        before_dedup = len(combined_df)
+        # 将笔记ID列转为字符串，避免类型不一致导致去重失败
+        combined_df[note_id_col] = combined_df[note_id_col].astype(str).str.strip()
+        # 移除完全为空的笔记ID行（保留这些行不去重，因为它们没有唯一标识）
+        non_null_mask = combined_df[note_id_col] != ''
+        null_rows = combined_df[~non_null_mask].copy()
+        non_null_df = combined_df[non_null_mask].copy()
+
+        # 对非空笔记ID去重，保留最后出现的（索引越大越新）
+        non_null_df = non_null_df.drop_duplicates(subset=[note_id_col], keep='last')
+
+        combined_df = pd.concat([non_null_df, null_rows], ignore_index=True)
+        after_dedup = len(combined_df)
+        st.success(f"✅ 基于「{note_id_col}」去重完成：{before_dedup} → {after_dedup} 条记录（保留了新增表中的更新）")
+    else:
+        st.warning("⚠️ 未找到「笔记ID」列，无法进行去重，合并结果可能存在重复记录。")
+
+    return combined_df
+
+# ======================== 预处理函数（与原逻辑完全一致） ========================
 def preprocess_for_analysis(df):
     """
     预处理：转换数值类型、解析日期、处理用户昵称/小红书号空值。
@@ -211,10 +257,11 @@ def find_note_link_column(df):
 
 # ======================== 主界面 ========================
 def main():
-    st.title("📕 小红书笔记数据可视化看板")
-    st.markdown(f"**数据源**：GitHub 仓库（实时同步） | 获赞与收藏数为作者主页总获赞收藏数")
+    st.title("📕 小红书笔记数据可视化看板（双源合并版）")
+    st.markdown(f"**数据源**：GitHub 仓库（底表 + 新增表，自动合并去重） | 获赞与收藏数为作者主页总获赞收藏数")
 
-    raw_df = load_data_from_github(GITHUB_RAW_URL)
+    # 加载合并后的全量数据
+    raw_df = load_combined_data()
     if raw_df.empty:
         st.stop()
 
@@ -224,7 +271,7 @@ def main():
 
     # 侧边栏全局筛选
     st.sidebar.header("🔍 全局数据筛选")
-    st.sidebar.markdown(f"**原始笔记数**: {len(df_ana)}")
+    st.sidebar.markdown(f"**原始笔记数（去重后）**: {len(df_ana)}")
     filter_mask = pd.Series([True] * len(df_ana))
 
     if 'publish_date' in df_ana.columns:
@@ -258,28 +305,18 @@ def main():
     df_filtered = df_ana[filter_mask].copy()
     raw_filtered = raw_df.loc[filter_mask] if filter_mask.dtype == bool else raw_df.iloc[filter_mask]
 
-    # ======================== 作者排行榜 ========================
+    # ======================== 作者排行榜（仅保留获赞与收藏数 Top10 和 粉丝数 Top10） ========================
     st.subheader("👥 作者维度综合排行榜")
     st.caption("以下统计基于左侧全局筛选后的数据 | 发布数量 = 有效笔记ID计数 | 获赞与收藏数为作者主页总获赞收藏数")
     author_df = get_author_aggregation(df_filtered)
     if not author_df.empty:
-        # 展示列顺序：姓名、工号、小红书号、用户昵称、发布数量、获赞与收藏数、粉丝数
         display_cols_order = ['姓名', '工号', '小红书号', '用户昵称', '发布数量', '获赞与收藏数', '粉丝数']
         display_cols_order = [c for c in display_cols_order if c in author_df.columns]
 
-        tab1, tab2, tab3 = st.tabs(["📦 发布数量 Top10", "🔥 获赞与收藏数 Top10", "👥 粉丝数 Top10"])
+        # 只保留两个 Tab：🔥 获赞与收藏数 Top10，👥 粉丝数 Top10
+        tab1, tab2 = st.tabs(["🔥 获赞与收藏数 Top10", "👥 粉丝数 Top10"])
 
         with tab1:
-            top_publish = author_df.sort_values('发布数量', ascending=False).head(10)
-            top_publish_display = top_publish[display_cols_order]
-            st.dataframe(top_publish_display, width='stretch')
-            fig_pub = px.bar(top_publish, x='用户昵称', y='发布数量',
-                             title="发布数量 Top10",
-                             text_auto=True, color='发布数量',
-                             hover_data=['姓名', '工号', '小红书号', '获赞与收藏数', '粉丝数'])
-            st.plotly_chart(fig_pub, use_container_width=True)
-
-        with tab2:
             if '获赞与收藏数' in author_df.columns:
                 top_likes = author_df.sort_values('获赞与收藏数', ascending=False).head(10)
                 top_likes_display = top_likes[display_cols_order]
@@ -292,7 +329,7 @@ def main():
             else:
                 st.info("数据中不含获赞与收藏数，无法展示该排行榜。")
 
-        with tab3:
+        with tab2:
             if '粉丝数' in author_df.columns:
                 top_fans = author_df.sort_values('粉丝数', ascending=False).head(10)
                 top_fans_display = top_fans[display_cols_order]
@@ -311,7 +348,7 @@ def main():
     st.subheader("🔍 发布监控（支持单日或日期范围）")
     st.caption("基于原始全量数据统计，不受左侧筛选影响。展示发布数量、发布状态等（不展示粉丝数、关注数）。")
 
-    df_monitor = preprocess_for_analysis(raw_df.copy())
+    df_monitor = preprocess_for_analysis(raw_df.copy())  # 使用合并去重后的全量数据
     if 'publish_date' in df_monitor.columns and 'author_group_key' in df_monitor.columns:
         valid_pub = df_monitor['publish_date'].dropna()
         if not valid_pub.empty:
@@ -387,7 +424,6 @@ def main():
                 lambda x: '⚠️ 该用户小红书号存在问题，请核查是否正确' if x == '(无小红书号)' else ''
             )
 
-            # 展示列：姓名、工号、小红书号、用户昵称、发布数量、发布状态、备注
             display_cols = ['姓名', '工号', '小红书号', '用户昵称', '发布数量', '发布状态', '备注']
             display_cols = [c for c in display_cols if c in author_status.columns]
             author_status = author_status[display_cols]
@@ -454,7 +490,6 @@ def main():
     # ======================== 原始数据预览 ========================
     st.subheader("📄 原始数据预览（应用全局筛选后）")
     preview_df = raw_filtered.copy()
-    # 确保相关列存在
     if '小红书号' not in preview_df.columns:
         preview_df['小红书号'] = ''
     if '获赞与收藏数' not in preview_df.columns:
@@ -480,13 +515,14 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("📌 说明")
     st.sidebar.info(
+        "**数据源**：自动合并「小红书笔记数据.xlsx」与「小红书笔记数据新增.xlsx」，并基于「笔记ID」去重（保留新增覆盖）。\n\n"
         "**字段说明**：\n"
         "- 小红书号：直接从Excel读取，独立于用户昵称。\n"
         "- 获赞与收藏数：作者主页总获赞与收藏数（取最大值，不累加）。\n"
         "- 关注数：从Excel读取，若无此列则默认为0。\n\n"
         "**姓名/工号**：从Excel中读取，若缺失显示空白。\n\n"
         "**无小红书号用户**：当「用户昵称」为空时，所有指标自动归零，且不计入发布数量。\n\n"
-        "**排行榜**：第二个Tab按「获赞与收藏数」排序展示Top10。\n\n"
+        "**排行榜**：两个Tab分别为「获赞与收藏数 Top10」和「粉丝数 Top10」。\n\n"
         "**发布监控**：只展示作者、小红书号、发布数量及状态，不展示粉丝数、关注数。"
     )
 
